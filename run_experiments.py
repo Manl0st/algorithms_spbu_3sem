@@ -6,18 +6,21 @@ run_experiments.py
 
 Как использовать
 ----------------
-1. При необходимости отредактируйте список EXPERIMENTS и значение REPEATS
-   в начале файла.
-2. Запустите::
+1. Запустите::
 
        python run_experiments.py
 
+   Программа покажет меню на русском языке; нажмите Enter для принятия
+   значений по умолчанию.
+
 Результаты будут сохранены в папке out/:
-  - results.csv  — одна строка на один запуск
-  - traces.csv   — динамика сходимости (все итерации всех запусков)
-  - summary.csv  — агрегированная статистика по конфигурациям
+  - results.csv          — одна строка на один запуск
+  - traces.csv           — динамика сходимости (все итерации всех запусков)
+  - summary.csv          — агрегированная статистика по конфигурациям
+  - experiment_meta.json — метаданные запуска (порог успеха, число повторений и т.д.)
 """
 
+import datetime
 import json
 import os
 import time
@@ -28,13 +31,13 @@ import pandas as pd
 # Импортируем алгоритмы из соседних файлов
 from ga_app  import run_ga
 from pso_app import run_pso
-from objective import TRUE_MIN
+from objective import BOUNDS, TRUE_MIN, TRUE_F
 
 # ===========================================================================
 # Настройки экспериментов — редактируйте этот раздел
 # ===========================================================================
 
-# Число независимых запусков для каждой конфигурации
+# Число независимых запусков для каждой конфигурации (можно изменить через меню)
 REPEATS: int = 30
 
 # Порог по dx для определения «успеха» (попал в окрестность глобального минимума)
@@ -133,6 +136,57 @@ EXPERIMENTS: list[dict] = [
 ]
 
 # ===========================================================================
+# Вспомогательные функции
+# ===========================================================================
+
+def _ask(prompt: str, default):
+    """Запросить ввод с подсказкой; пустой ввод → default."""
+    raw = input(f"{prompt} [{default}]: ").strip()
+    if raw == "":
+        return default
+    return type(default)(raw)
+
+
+def _interactive_setup(repeats: int, threshold: float) -> tuple[int, float]:
+    """
+    Показать русское меню и дать пользователю изменить настройки.
+
+    Возвращает (repeats, threshold) — возможно изменённые.
+    """
+    print("\n=== Пакетные эксперименты — минимизация Eggholder ===")
+    print("Нажмите Enter для принятия значения по умолчанию.\n")
+
+    while True:
+        print(f"Текущие настройки: повторений = {repeats}, порог успеха dx = {threshold}")
+        print("Меню:")
+        print("  1) Запустить с текущими настройками")
+        print("  2) Изменить число повторений (REPEATS)")
+        print("  3) Изменить порог успеха dx (SUCCESS_DX_THRESHOLD)")
+        choice = input("Ваш выбор [1]: ").strip() or "1"
+
+        if choice == "1":
+            break
+        elif choice == "2":
+            raw = input(f"Число повторений [{repeats}]: ").strip()
+            if raw:
+                try:
+                    repeats = int(raw)
+                except ValueError:
+                    print("Ошибка: введите целое число.")
+        elif choice == "3":
+            raw = input(f"Порог успеха dx [{threshold}]: ").strip()
+            if raw:
+                try:
+                    threshold = float(raw)
+                except ValueError:
+                    print("Ошибка: введите число.")
+        else:
+            print("Неизвестный выбор, попробуйте снова.")
+
+    return repeats, threshold
+
+
+# ===========================================================================
 # Вспомогательная функция: запустить один эксперимент
 # ===========================================================================
 
@@ -212,13 +266,16 @@ def main():
 
     os.makedirs("out", exist_ok=True)
 
+    # -- Интерактивное меню: настройки до запуска ----------------------------
+    repeats, success_dx = _interactive_setup(REPEATS, SUCCESS_DX_THRESHOLD)
+
     all_results: list[dict]      = []   # строки для results.csv
     all_traces:  list[pd.DataFrame] = []  # трассы для traces.csv
 
     run_id = 0  # глобальный счётчик запусков
 
-    total_runs = len(EXPERIMENTS) * REPEATS
-    print(f"Запускаем {len(EXPERIMENTS)} конфигураций × {REPEATS} повторений"
+    total_runs = len(EXPERIMENTS) * repeats
+    print(f"\nЗапускаем {len(EXPERIMENTS)} конфигураций × {repeats} повторений"
           f" = {total_runs} запусков.")
     print("=" * 60)
 
@@ -229,9 +286,9 @@ def main():
 
         seed_base = config.get("seed_base", 1000)  # базовый seed для серии
 
-        for rep in range(REPEATS):
+        for rep in range(repeats):
             seed = seed_base + rep
-            print(f"  Повторение {rep + 1:3d}/{REPEATS} (seed={seed})...", end=" ")
+            print(f"  Повторение {rep + 1:3d}/{repeats} (seed={seed})...", end=" ")
 
             try:
                 row, trace_df = _run_one(config, seed)
@@ -292,7 +349,7 @@ def main():
             algo_name = grp["algo"].iloc[0]
             n = len(grp)
 
-            success_mask = grp["dx"] < SUCCESS_DX_THRESHOLD
+            success_mask = grp["dx"] < success_dx
             success_rate = float(success_mask.sum()) / n  # доля успешных запусков
 
             summary_rows.append({
@@ -302,8 +359,13 @@ def main():
                 "mean_best_f":   grp["best_f"].mean(),
                 "std_best_f":    grp["best_f"].std(),
                 "median_best_f": grp["best_f"].median(),
+                "min_best_f":    grp["best_f"].min(),
+                "max_best_f":    grp["best_f"].max(),
                 "mean_dx":       grp["dx"].mean(),
                 "std_dx":        grp["dx"].std(),
+                "median_dx":     grp["dx"].median(),
+                "min_dx":        grp["dx"].min(),
+                "max_dx":        grp["dx"].max(),
                 "success_rate":  success_rate,
                 "mean_time_sec": grp["time_sec"].mean(),
                 "mean_evals":    grp["evals"].mean(),
@@ -320,6 +382,24 @@ def main():
         pd.set_option("display.width", 120)
         pd.set_option("display.float_format", "{:.4f}".format)
         print(summary_df.to_string(index=False))
+
+    # -----------------------------------------------------------------------
+    # Сохранить experiment_meta.json — используется make_plots.py
+    # -----------------------------------------------------------------------
+    meta = {
+        "created_at":           datetime.datetime.now().isoformat(timespec="seconds"),
+        "repeats":              repeats,
+        "SUCCESS_DX_THRESHOLD": success_dx,
+        "number_of_variants":   len(EXPERIMENTS),
+        "total_runs":           run_id,          # реально завершённых
+        "bounds":               [list(b) for b in BOUNDS],
+        "true_min":             list(TRUE_MIN),
+        "true_f":               TRUE_F,
+    }
+    meta_path = os.path.join("out", "experiment_meta.json")
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=2)
+    print(f"Сохранено: {meta_path}")
 
     print("\nГотово.")
 

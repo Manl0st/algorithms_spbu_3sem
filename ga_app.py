@@ -65,13 +65,15 @@ def _encode_binary(x: float, y: float, bits: int) -> np.ndarray:
     Вещественное значение v ∈ [lo, hi] отображается в целое число
     i = round((v - lo) / (hi - lo) * (2^bits - 1)), затем записывается
     в виде bits бит (MSB first).
+
+    Для переменной x используются BOUNDS[0], для y — BOUNDS[1].
     """
     chromosome = np.empty(2 * bits, dtype=np.int8)
-    lo, hi = BOUNDS[0]
     max_int = (1 << bits) - 1
 
+    # Перебираем переменные: idx=0 → x (BOUNDS[0]), idx=1 → y (BOUNDS[1])
     for var_idx, v in enumerate((x, y)):
-        # нормировать в [0, max_int]
+        lo, hi = BOUNDS[var_idx]
         i = round((v - lo) / (hi - lo) * max_int)
         i = max(0, min(max_int, i))
         for bit_idx in range(bits):
@@ -83,12 +85,14 @@ def _encode_binary(x: float, y: float, bits: int) -> np.ndarray:
 def _decode_binary(chromosome: np.ndarray, bits: int) -> tuple[float, float]:
     """
     Декодировать двоичную хромосому обратно в пару (x, y).
+
+    Для переменной x используются BOUNDS[0], для y — BOUNDS[1].
     """
-    lo, hi = BOUNDS[0]
     max_int = (1 << bits) - 1
     result = []
 
     for var_idx in range(2):
+        lo, hi = BOUNDS[var_idx]
         segment = chromosome[var_idx * bits : (var_idx + 1) * bits]
         integer = 0
         for bit in segment:
@@ -290,7 +294,8 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
     tournament_k    : int   — размер турнира
     elitism         : int   — число элитных особей
     seed            : int   — начальное значение ГСЧ
-    stop_eps_dx     : float — останов, если изменение best_f < eps_dx
+    stop_eps_f      : float — останов, если улучшение best_f < eps_f (порог по функции)
+    stop_eps_dx     : float — останов, если best_dx < eps_dx (0 = отключён)
     no_improve_patience : int — останов, если нет улучшения N поколений
 
     Возвращает
@@ -312,8 +317,15 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
     tourn_k      = int(params.get("tournament_k",    3))
     elitism      = int(params.get("elitism",         1))
     seed         = int(params.get("seed",            42))
-    eps_dx       = float(params.get("stop_eps_dx",   1e-3))
+    eps_f        = float(params.get("stop_eps_f",    1e-6))   # порог улучшения функции
+    eps_dx       = float(params.get("stop_eps_dx",   0.0))    # порог dx (0 = отключён)
     patience     = int(params.get("no_improve_patience", 80))
+
+    # Для вещественного кодирования поддерживается только арифметический кроссинговер
+    if enc == "real" and cx_type != "arithmetic":
+        print(f"Предупреждение: для вещественного кодирования поддерживается только "
+              f"'arithmetic'. Тип '{cx_type}' заменён на 'arithmetic'.")
+        cx_type = "arithmetic"
 
     # sigma для гауссовой мутации (real): 5% от диапазона
     lo, hi = BOUNDS[0]
@@ -352,9 +364,9 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
             "evals_so_far": obj.evals,
         })
 
-        # 2. Критерий останова: нет улучшения в течение patience поколений.
-        #    Улучшением считается уменьшение best_f более чем на eps_dx.
-        if best_f < best_f_prev - eps_dx:
+        # 2. Критерий останова по улучшению функции.
+        #    Улучшением считается уменьшение best_f более чем на eps_f.
+        if best_f < best_f_prev - eps_f:
             best_f_prev    = best_f
             no_improve_cnt = 0
         else:
@@ -363,12 +375,20 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
         if no_improve_cnt >= patience:
             break
 
-        # 3. Элитизм: сохранить лучших особей
+        # 3. Критерий останова по близости к истинному минимуму (если включён).
+        if eps_dx > 0.0 and best_dx < eps_dx:
+            break
+
+        # 4. Элитизм: сохранить лучших особей
         elite_idxs = np.argsort(fitness)[:elitism]
         elites     = [population[i].copy() for i in elite_idxs]
 
-        # 4. Формирование нового поколения
+        # 5. Формирование нового поколения
         new_population = []
+
+        # Границы для клиппинга вещественных потомков
+        _lo_arr = np.array([b[0] for b in BOUNDS])
+        _hi_arr = np.array([b[1] for b in BOUNDS])
 
         while len(new_population) < pop_size - elitism:
             # --- турнирная селекция ---
@@ -382,6 +402,10 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
                 c1, c2 = _crossover_binary(p1, p2, cx_type, cx_rate, rng)
             else:
                 c1, c2 = _crossover_real(p1, p2, cx_rate, rng)
+                # Клиппинг после кроссинговера (арифметический кроссинговер не выходит
+                # за пределы, но страховка нужна при возможных числовых погрешностях)
+                c1 = np.clip(c1, _lo_arr, _hi_arr)
+                c2 = np.clip(c2, _lo_arr, _hi_arr)
 
             # --- мутация ---
             if enc == "binary":
@@ -395,7 +419,7 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
             if len(new_population) < pop_size - elitism:
                 new_population.append(c2)
 
-        # 5. Добавить элиты в начало нового поколения
+        # 6. Добавить элиты в начало нового поколения
         population = elites + new_population
         fitness    = _evaluate(population, enc, bits, obj)
 
@@ -468,7 +492,8 @@ def _interactive_params() -> dict:
     tourn_k  = int(_ask("Размер турнира (tournament_k)", 3))
     elitism  = int(_ask("Число элитных особей (elitism)", 1))
     seed     = int(_ask("Начальный seed", 42))
-    eps_dx   = float(_ask("Критерий останова eps_dx (stop_eps_dx)", 1e-3))
+    eps_f    = float(_ask("Порог улучшения функции stop_eps_f", 1e-6))
+    eps_dx   = float(_ask("Порог останова по dx stop_eps_dx (0 = отключён)", 0.0))
     patience = int(_ask("Терпение без улучшения (no_improve_patience)", 80))
 
     return {
@@ -482,6 +507,7 @@ def _interactive_params() -> dict:
         "tournament_k":        tourn_k,
         "elitism":             elitism,
         "seed":                seed,
+        "stop_eps_f":          eps_f,
         "stop_eps_dx":         eps_dx,
         "no_improve_patience": patience,
     }
