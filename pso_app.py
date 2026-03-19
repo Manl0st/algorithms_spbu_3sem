@@ -109,6 +109,8 @@ def run_pso(params: dict) -> tuple[dict, pd.DataFrame]:
     seed       = int(params.get("seed",        42))
     vmax_raw   = params.get("vmax",       None)
     vmax       = float(vmax_raw) if vmax_raw is not None else None
+    # Досрочный останов, когда best_dx < порога (0 = отключён)
+    stop_eps_dx = float(params.get("stop_eps_dx", 0.0))
 
     if mode == "basic":
         w  = float(params.get("w",  0.7))
@@ -173,6 +175,10 @@ def run_pso(params: dict) -> tuple[dict, pd.DataFrame]:
             "gbest_x":   gbest_pos[0],
             "gbest_y":   gbest_pos[1],
         })
+
+        # Досрочный останов по близости к истинному минимуму (если включён)
+        if stop_eps_dx > 0.0 and best_dx < stop_eps_dx:
+            break
 
         # 2. Обновить pbest для всех частиц
         improved = cur_vals < pbest_val
@@ -291,6 +297,11 @@ def _interactive_params() -> dict:
     if vmax_str:
         params["vmax"] = float(vmax_str)
 
+    # Досрочный останов по близости к глобальному минимуму (0 = отключён)
+    eps_dx_str = _ask("Порог досрочного останова stop_eps_dx (0 = отключён)", 0.0)
+    if float(eps_dx_str) > 0.0:
+        params["stop_eps_dx"] = float(eps_dx_str)
+
     return params
 
 
@@ -308,6 +319,8 @@ def main():
     print(f"  df = f - f*   : {result['df']:.6f}")
     print(f"  Вычислений f  : {result['evals']}")
     print(f"  Итераций      : {result['iters']}")
+    if result["mode"] == "constriction":
+        print(f"  Коэффициент χ : {result['chi']:.6f}")
     print(f"  Время         : {result['time_sec']:.3f} с")
 
     # -- сохранение результатов ----------------------------------------------

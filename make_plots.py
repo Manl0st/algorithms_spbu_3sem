@@ -6,6 +6,7 @@ make_plots.py
 Читает файлы:
   - out/results.csv
   - out/traces.csv
+  - out/experiment_meta.json  (необязательно; для согласованного порога dx)
 
 Создаёт папку out/plots/ и сохраняет PNG-файлы:
   1. convergence_mean.png  — средняя кривая best_f(iter) ± std по вариантам
@@ -19,6 +20,7 @@ make_plots.py
     python make_plots.py
 """
 
+import json
 import os
 import sys
 
@@ -36,10 +38,11 @@ from objective import TRUE_MIN, TRUE_F
 # ---------------------------------------------------------------------------
 RESULTS_CSV  = os.path.join("out", "results.csv")
 TRACES_CSV   = os.path.join("out", "traces.csv")
+META_JSON    = os.path.join("out", "experiment_meta.json")
 PLOTS_DIR    = os.path.join("out", "plots")
 
-# Порог «успеха» должен совпадать с run_experiments.py
-SUCCESS_DX_THRESHOLD = 1.0
+# Значение по умолчанию; будет перезаписано из experiment_meta.json если файл есть
+_DEFAULT_DX_THRESHOLD = 1.0
 
 # Цветовая схема — по одному цвету на вариант
 PALETTE = [
@@ -47,6 +50,30 @@ PALETTE = [
     "#d62728", "#9467bd", "#8c564b",
     "#e377c2", "#7f7f7f",
 ]
+
+
+# ===========================================================================
+# Загрузка порога из метаданных эксперимента
+# ===========================================================================
+
+def _load_threshold() -> float:
+    """
+    Попытаться загрузить SUCCESS_DX_THRESHOLD из experiment_meta.json.
+    Если файл отсутствует или не содержит ключа — вернуть _DEFAULT_DX_THRESHOLD.
+    """
+    if os.path.exists(META_JSON):
+        try:
+            with open(META_JSON, encoding="utf-8") as fh:
+                meta = json.load(fh)
+            threshold = float(meta.get("SUCCESS_DX_THRESHOLD", _DEFAULT_DX_THRESHOLD))
+            print(f"Загружен порог dx из {META_JSON}: {threshold}")
+            return threshold
+        except Exception as err:
+            print(f"Предупреждение: не удалось прочитать {META_JSON}: {err}")
+    else:
+        print(f"Файл {META_JSON} не найден; используется порог по умолчанию "
+              f"{_DEFAULT_DX_THRESHOLD}.")
+    return _DEFAULT_DX_THRESHOLD
 
 
 # ===========================================================================
@@ -61,10 +88,12 @@ def _load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
             "Сначала запустите run_experiments.py"
         )
     if not os.path.exists(TRACES_CSV):
-        sys.exit(
-            f"Файл '{TRACES_CSV}' не найден. "
-            "Сначала запустите run_experiments.py"
+        print(
+            f"Предупреждение: файл '{TRACES_CSV}' не найден. "
+            "Графики сходимости строиться не будут."
         )
+        results = pd.read_csv(RESULTS_CSV)
+        return results, pd.DataFrame()
 
     results = pd.read_csv(RESULTS_CSV)
     traces  = pd.read_csv(TRACES_CSV)
@@ -160,7 +189,7 @@ def plot_boxplot_best_f(results: pd.DataFrame, colors: dict) -> None:
 # 3. Boxplot dx
 # ===========================================================================
 
-def plot_boxplot_dx(results: pd.DataFrame, colors: dict) -> None:
+def plot_boxplot_dx(results: pd.DataFrame, colors: dict, threshold: float) -> None:
     """
     Ящик с усами расстояния до истинного минимума (dx) по вариантам.
     """
@@ -175,8 +204,8 @@ def plot_boxplot_dx(results: pd.DataFrame, colors: dict) -> None:
         patch.set_facecolor(colors.get(variant, "#aaaaaa"))
         patch.set_alpha(0.7)
 
-    ax.axhline(SUCCESS_DX_THRESHOLD, color="red", linestyle="--", linewidth=1.2,
-               label=f"Порог успеха dx < {SUCCESS_DX_THRESHOLD}")
+    ax.axhline(threshold, color="red", linestyle="--", linewidth=1.2,
+               label=f"Порог успеха dx < {threshold}")
     ax.set_xticks(range(1, len(variants) + 1))
     ax.set_xticklabels(variants, rotation=20, ha="right", fontsize=9)
     ax.set_ylabel("dx (расстояние до глобального минимума)", fontsize=12)
@@ -191,13 +220,13 @@ def plot_boxplot_dx(results: pd.DataFrame, colors: dict) -> None:
 # 4. Столбчатая диаграмма success_rate
 # ===========================================================================
 
-def plot_success_rate(results: pd.DataFrame, colors: dict) -> None:
+def plot_success_rate(results: pd.DataFrame, colors: dict, threshold: float) -> None:
     """
     Столбчатая диаграмма доли успешных запусков (dx < порог) по вариантам.
     """
     variants = results["variant"].unique()
     rates    = [
-        (results[results["variant"] == v]["dx"] < SUCCESS_DX_THRESHOLD).mean()
+        (results[results["variant"] == v]["dx"] < threshold).mean()
         for v in variants
     ]
 
@@ -216,7 +245,7 @@ def plot_success_rate(results: pd.DataFrame, colors: dict) -> None:
     ax.set_ylim(0, 1.12)
     ax.set_xticks(range(len(variants)))
     ax.set_xticklabels(variants, rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel(f"Доля успехов (dx < {SUCCESS_DX_THRESHOLD})", fontsize=12)
+    ax.set_ylabel(f"Доля успехов (dx < {threshold})", fontsize=12)
     ax.set_title("Вероятность нахождения глобального минимума", fontsize=13)
     ax.grid(True, axis="y", alpha=0.3)
 
@@ -265,6 +294,16 @@ def main():
 
     print("=== Построение графиков ===")
 
+    # -- Определить порог успеха: сначала из метаданных, затем спросить пользователя
+    threshold = _load_threshold()
+    raw = input(f"Порог успеха dx [{threshold}] (Enter = оставить): ").strip()
+    if raw:
+        try:
+            threshold = float(raw)
+        except ValueError:
+            print(f"Некорректное значение '{raw}'; используется {threshold}.")
+    print(f"Порог успеха dx = {threshold}\n")
+
     results, traces = _load_data()
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
@@ -278,10 +317,14 @@ def main():
         print(f"  {v}: {n} запусков")
     print()
 
-    plot_convergence(traces, colors)
+    if not traces.empty:
+        plot_convergence(traces, colors)
+    else:
+        print("Пропуск графика сходимости: нет данных трасс.")
+
     plot_boxplot_best_f(results, colors)
-    plot_boxplot_dx(results, colors)
-    plot_success_rate(results, colors)
+    plot_boxplot_dx(results, colors, threshold)
+    plot_success_rate(results, colors, threshold)
     plot_scatter_endpoints(results, colors)
 
     print("\nВсе графики сохранены в:", PLOTS_DIR)
