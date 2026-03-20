@@ -36,29 +36,19 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 
 from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective
 
-# ---------------------------------------------------------------------------
-# Вспомогательные функции общего назначения
-# ---------------------------------------------------------------------------
-
 def _clip(value: float, lo: float, hi: float) -> float:
     """Ограничить value отрезком [lo, hi]."""
     return max(lo, min(hi, value))
 
-
 def _euclidean(x1: float, y1: float, x2: float, y2: float) -> float:
     """Евклидово расстояние между двумя точками 2D."""
     return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-
-
-# ===========================================================================
-# Бинарное кодирование
-# ===========================================================================
 
 def _encode_binary(x: float, y: float, bits: int) -> np.ndarray:
     """
@@ -73,7 +63,6 @@ def _encode_binary(x: float, y: float, bits: int) -> np.ndarray:
     chromosome = np.empty(2 * bits, dtype=np.int8)
     max_int = (1 << bits) - 1
 
-    # Перебираем переменные: idx=0 → x (BOUNDS[0]), idx=1 → y (BOUNDS[1])
     for var_idx, v in enumerate((x, y)):
         lo, hi = BOUNDS[var_idx]
         i = round((v - lo) / (hi - lo) * max_int)
@@ -82,7 +71,6 @@ def _encode_binary(x: float, y: float, bits: int) -> np.ndarray:
             chromosome[var_idx * bits + (bits - 1 - bit_idx)] = (i >> bit_idx) & 1
 
     return chromosome
-
 
 def _decode_binary(chromosome: np.ndarray, bits: int) -> tuple[float, float]:
     """
@@ -104,11 +92,6 @@ def _decode_binary(chromosome: np.ndarray, bits: int) -> tuple[float, float]:
 
     return result[0], result[1]
 
-
-# ===========================================================================
-# Популяция
-# ===========================================================================
-
 def _init_population(pop_size: int, encoding: str, bits: int,
                      rng: np.random.Generator) -> list:
     """
@@ -122,14 +105,13 @@ def _init_population(pop_size: int, encoding: str, bits: int,
     for _ in range(pop_size):
         if encoding == "binary":
             chrom = rng.integers(0, 2, size=2 * bits, dtype=np.int8)
-        else:  # real — FIX: использовать границы каждой переменной отдельно
+        else:
             x_val = rng.uniform(BOUNDS[0][0], BOUNDS[0][1])
             y_val = rng.uniform(BOUNDS[1][0], BOUNDS[1][1])
             chrom = np.array([x_val, y_val], dtype=float)
         population.append(chrom)
 
     return population
-
 
 def _phenotype(chromosome: np.ndarray, encoding: str, bits: int) -> tuple[float, float]:
     """
@@ -139,11 +121,6 @@ def _phenotype(chromosome: np.ndarray, encoding: str, bits: int) -> tuple[float,
         return _decode_binary(chromosome, bits)
     else:
         return float(chromosome[0]), float(chromosome[1])
-
-
-# ===========================================================================
-# Оценка популяции
-# ===========================================================================
 
 def _evaluate(population: list, encoding: str, bits: int,
                obj: CounterObjective) -> np.ndarray:
@@ -157,11 +134,6 @@ def _evaluate(population: list, encoding: str, bits: int,
         x, y = _phenotype(chrom, encoding, bits)
         fitness[i] = obj(x, y)
     return fitness
-
-
-# ===========================================================================
-# Турнирная селекция
-# ===========================================================================
 
 def _tournament_select(fitness: np.ndarray, k: int,
                         rng: np.random.Generator) -> int:
@@ -186,11 +158,6 @@ def _tournament_select(fitness: np.ndarray, k: int,
     best = candidates[np.argmin(fitness[candidates])]
     return int(best)
 
-
-# ===========================================================================
-# Операторы кроссинговера
-# ===========================================================================
-
 def _crossover_binary(parent1: np.ndarray, parent2: np.ndarray,
                       ctype: str, rate: float,
                       rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
@@ -200,30 +167,29 @@ def _crossover_binary(parent1: np.ndarray, parent2: np.ndarray,
     ctype ∈ {"one_point", "two_point", "uniform"}
     """
     if rng.random() > rate:
-        # нет кроссинговера — возвращаем копии родителей
+
         return parent1.copy(), parent2.copy()
 
     n = len(parent1)
     c1, c2 = parent1.copy(), parent2.copy()
 
     if ctype == "one_point":
-        # одна точка разрыва
+
         pt = int(rng.integers(1, n))
         c1[pt:], c2[pt:] = parent2[pt:].copy(), parent1[pt:].copy()
 
     elif ctype == "two_point":
-        # две точки разрыва
+
         pts = sorted(rng.choice(range(1, n), size=2, replace=False))
         a, b = pts[0], pts[1]
         c1[a:b], c2[a:b] = parent2[a:b].copy(), parent1[a:b].copy()
 
     elif ctype == "uniform":
-        # каждый бит обменивается с вероятностью 0.5
+
         mask = rng.integers(0, 2, size=n, dtype=bool)
         c1[mask], c2[mask] = parent2[mask].copy(), parent1[mask].copy()
 
     return c1, c2
-
 
 def _crossover_real(parent1: np.ndarray, parent2: np.ndarray,
                     rate: float,
@@ -244,11 +210,6 @@ def _crossover_real(parent1: np.ndarray, parent2: np.ndarray,
     c2 = (1.0 - alpha) * parent1 + alpha * parent2
     return c1, c2
 
-
-# ===========================================================================
-# Операторы мутации
-# ===========================================================================
-
 def _mutate_binary(chromosome: np.ndarray, rate: float,
                    rng: np.random.Generator) -> np.ndarray:
     """
@@ -258,7 +219,6 @@ def _mutate_binary(chromosome: np.ndarray, rate: float,
     mask = rng.random(len(chrom)) < rate
     chrom[mask] = 1 - chrom[mask]
     return chrom
-
 
 def _mutate_real(chromosome: np.ndarray, rate: float, sigma: float,
                  rng: np.random.Generator) -> np.ndarray:
@@ -270,16 +230,11 @@ def _mutate_real(chromosome: np.ndarray, rate: float, sigma: float,
     """
     chrom = chromosome.copy()
     for i in range(len(chrom)):
-        lo, hi = BOUNDS[i]  # FIX: раздельные границы для x (i=0) и y (i=1)
+        lo, hi = BOUNDS[i]
         if rng.random() < rate:
             chrom[i] += rng.normal(0.0, sigma)
             chrom[i] = _clip(chrom[i], lo, hi)
     return chrom
-
-
-# ===========================================================================
-# Основной алгоритм ГА
-# ===========================================================================
 
 def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     """
@@ -316,7 +271,6 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         Статистика по поколениям (внутренние имена столбцов).
     """
 
-    # -- параметры с дефолтами -----------------------------------------------
     enc          = params.get("encoding",            "binary")
     bits         = int(params.get("bits_per_var",    20))
     pop_size     = int(params.get("pop_size",        50))
@@ -327,20 +281,17 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     tourn_k      = int(params.get("tournament_k",    3))
     elitism      = int(params.get("elitism",         1))
     seed         = int(params.get("seed",            42))
-    eps_f        = float(params.get("stop_eps_f",    1e-6))   # порог улучшения функции
-    eps_dx       = float(params.get("stop_eps_dx",   0.0))    # порог dx (0 = отключён)
+    eps_f        = float(params.get("stop_eps_f",    1e-6))
+    eps_dx       = float(params.get("stop_eps_dx",   0.0))
     patience     = int(params.get("no_improve_patience", 80))
-    viz_every    = int(params.get("viz_every",       0))      # 0 = не передавать позиции
+    viz_every    = int(params.get("viz_every",       0))
 
-    # Для вещественного кодирования поддерживается только арифметический кроссинговер
     if enc == "real" and cx_type != "arithmetic":
         cx_type = "arithmetic"
 
-    # sigma для гауссовой мутации (real): 5% от диапазона переменной x
     lo0, hi0 = BOUNDS[0]
     sigma = (hi0 - lo0) * 0.05
 
-    # -- инициализация --------------------------------------------------------
     rng = np.random.default_rng(seed)
     obj = CounterObjective()
     t_start = time.perf_counter()
@@ -348,19 +299,15 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     population = _init_population(pop_size, enc, bits, rng)
     fitness    = _evaluate(population, enc, bits, obj)
 
-    # -- история --------------------------------------------------------------
-    trace_rows = []          # строки для CSV-трассы
-    best_f_prev = np.inf     # для критерия останова по патциенции
-    no_improve_cnt = 0       # счётчик поколений без улучшения
+    trace_rows = []
+    best_f_prev = np.inf
+    no_improve_cnt = 0
 
-    # Границы для клиппинга вещественных потомков (per-variable)
     _lo_arr = np.array([b[0] for b in BOUNDS])
     _hi_arr = np.array([b[1] for b in BOUNDS])
 
-    # -- главный цикл ---------------------------------------------------------
     for gen in range(generations):
 
-        # 1. Статистика текущего поколения
         best_idx = int(np.argmin(fitness))
         best_f   = float(fitness[best_idx])
         mean_f   = float(np.mean(fitness))
@@ -377,7 +324,6 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
             "evals_so_far": obj.evals,
         })
 
-        # Подготовить данные для визуализации (только при viz_every)
         positions_xy = None
         best_xy_arr  = None
         if callback is not None and viz_every > 0 and gen % viz_every == 0:
@@ -387,7 +333,6 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         if callback is not None:
             callback(gen, generations, best_f, positions_xy, best_xy_arr)
 
-        # 2. Критерий останова по улучшению функции.
         if best_f < best_f_prev - eps_f:
             best_f_prev    = best_f
             no_improve_cnt = 0
@@ -397,25 +342,21 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         if no_improve_cnt >= patience:
             break
 
-        # 3. Критерий останова по близости к истинному минимуму (если включён).
         if eps_dx > 0.0 and best_dx < eps_dx:
             break
 
-        # 4. Элитизм: сохранить лучших особей
         elite_idxs = np.argsort(fitness)[:elitism]
         elites     = [population[i].copy() for i in elite_idxs]
 
-        # 5. Формирование нового поколения
         new_population = []
 
         while len(new_population) < pop_size - elitism:
-            # --- турнирная селекция ---
+
             idx1 = _tournament_select(fitness, tourn_k, rng)
             idx2 = _tournament_select(fitness, tourn_k, rng)
             p1   = population[idx1]
             p2   = population[idx2]
 
-            # --- кроссинговер ---
             if enc == "binary":
                 c1, c2 = _crossover_binary(p1, p2, cx_type, cx_rate, rng)
             else:
@@ -423,7 +364,6 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
                 c1 = np.clip(c1, _lo_arr, _hi_arr)
                 c2 = np.clip(c2, _lo_arr, _hi_arr)
 
-            # --- мутация ---
             if enc == "binary":
                 c1 = _mutate_binary(c1, mut_rate, rng)
                 c2 = _mutate_binary(c2, mut_rate, rng)
@@ -435,11 +375,9 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
             if len(new_population) < pop_size - elitism:
                 new_population.append(c2)
 
-        # 6. Добавить элиты в начало нового поколения
         population = elites + new_population
         fitness    = _evaluate(population, enc, bits, obj)
 
-    # -- финальный результат --------------------------------------------------
     best_idx = int(np.argmin(fitness))
     bx, by   = _phenotype(population[best_idx], enc, bits)
     best_f   = float(fitness[best_idx])
@@ -448,7 +386,7 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     elapsed  = time.perf_counter() - t_start
 
     result = {
-        # параметры
+
         "encoding":       enc,
         "bits_per_var":   bits,
         "pop_size":       pop_size,
@@ -459,7 +397,7 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         "tournament_k":   tourn_k,
         "elitism":        elitism,
         "seed":           seed,
-        # результаты
+
         "best_x":    bx,
         "best_y":    by,
         "best_f":    best_f,
@@ -473,12 +411,6 @@ def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     trace_df = pd.DataFrame(trace_rows)
     return result, trace_df
 
-
-# ===========================================================================
-# GUI
-# ===========================================================================
-
-# Словари для перевода между человекочитаемыми именами и внутренними значениями
 _ENC_LABELS     = {"Бинарное": "binary", "Вещественное": "real"}
 _ENC_LABELS_INV = {v: k for k, v in _ENC_LABELS.items()}
 
@@ -492,7 +424,6 @@ _CX_BIN_INV = {v: k for k, v in _CX_BIN_LABELS.items()}
 _CX_REAL_LABELS = {"Арифметический": "arithmetic"}
 _CX_REAL_INV    = {v: k for k, v in _CX_REAL_LABELS.items()}
 
-# Трасса ГА с русскими заголовками столбцов
 _TRACE_RU_COLUMNS = {
     "gen":          "поколение",
     "best_f":       "лучшее_f",
@@ -503,12 +434,11 @@ _TRACE_RU_COLUMNS = {
     "evals_so_far": "вычислений_всего",
 }
 
-
 class _GAWorker(QThread):
     """Рабочий поток для запуска ГА без блокировки UI."""
 
-    progress = pyqtSignal(int, int, float, object, object)  # gen, gens, best_f, positions_xy, best_xy
-    done     = pyqtSignal(dict, object)   # result, trace_df
+    progress = pyqtSignal(int, int, float, object, object)
+    done     = pyqtSignal(dict, object)
     error    = pyqtSignal(str)
 
     def __init__(self, params: dict):
@@ -525,32 +455,27 @@ class _GAWorker(QThread):
         except Exception as exc:
             self.error.emit(str(exc))
 
-
 class _GAWindow(QWidget):
     """Главное окно ГА — Eggholder."""
 
-    _TRAIL_LEN = 30
+    _GBEST_TRAIL_LEN = 200
+    _INDIVIDUAL_TRAIL_LEN = 7
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ГА — Eggholder")
         self._best_trail: list[tuple[float, float]] = []
+        self._particle_trails: list[list] = []
         self._worker: _GAWorker | None = None
         self._build_ui()
-
-    # ------------------------------------------------------------------
-    # Построение UI
-    # ------------------------------------------------------------------
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
 
-        # ---- Верхняя строка: параметры + визуализация ----
         top_row = QHBoxLayout()
         root_layout.addLayout(top_row)
 
-        # Левая колонка: параметры
         params_box = QGroupBox("Параметры ГА")
         params_layout = QFormLayout(params_box)
         params_layout.setContentsMargins(8, 12, 8, 8)
@@ -577,7 +502,6 @@ class _GAWindow(QWidget):
 
         self._enc_cb.currentTextChanged.connect(self._on_enc_changed)
 
-        # Правая колонка: визуализация
         viz_box = QGroupBox("Визуализация популяции")
         viz_layout = QVBoxLayout(viz_box)
         viz_layout.setContentsMargins(6, 12, 6, 6)
@@ -596,35 +520,26 @@ class _GAWindow(QWidget):
         self._plot.getAxis("left").setLabel("y")
         viz_layout.addWidget(self._plot)
 
-        # Легенда
         legend_lbl = QLabel("● Синие: особи   ● Оранжевая: лучший   ★ Красная: минимум")
         legend_lbl.setStyleSheet("color: #888888; font-size: 9px;")
         viz_layout.addWidget(legend_lbl)
 
-        # Живая статистика
-        self._info_lbl = QLabel("")
-        mono = QFont("Monospace", 9)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-        self._info_lbl.setFont(mono)
-        self._info_lbl.setStyleSheet("color: #4488cc;")
-        viz_layout.addWidget(self._info_lbl)
-
-        # Постоянные элементы графика
-        self._pop_scatter  = pg.ScatterPlotItem(size=6,  pen=None, brush=pg.mkBrush("#4488cc"))
-        self._best_scatter = pg.ScatterPlotItem(size=12, pen=pg.mkPen("#ffffff", width=1),
+        self._pop_scatter  = pg.ScatterPlotItem(size=5,  pen=None, brush=pg.mkBrush("#4488cc"))
+        self._best_scatter = pg.ScatterPlotItem(size=14, pen=pg.mkPen("#ffffff", width=1),
                                                 brush=pg.mkBrush("#ff8800"))
-        self._trail_curve  = pg.PlotCurveItem(pen=pg.mkPen("#00cc44", width=1.5))
+        self._trail_curve  = pg.PlotCurveItem(pen=pg.mkPen("#ff8800", width=1))
+        self._ptrl_curve   = pg.PlotCurveItem(pen=pg.mkPen((68, 136, 204, 80), width=1))
         self._true_min_sct = pg.ScatterPlotItem(
             pos=[[TRUE_MIN[0], TRUE_MIN[1]]], size=16,
             symbol="star", pen=pg.mkPen("#ff4444", width=1),
             brush=pg.mkBrush("#ff4444"))
 
+        self._plot.addItem(self._ptrl_curve)
         self._plot.addItem(self._trail_curve)
         self._plot.addItem(self._pop_scatter)
         self._plot.addItem(self._best_scatter)
         self._plot.addItem(self._true_min_sct)
 
-        # ---- Управление ----
         ctrl_layout = QHBoxLayout()
         root_layout.addLayout(ctrl_layout)
 
@@ -647,7 +562,6 @@ class _GAWindow(QWidget):
         self._pb_lbl.setStyleSheet("font-size: 8pt;")
         root_layout.addWidget(self._pb_lbl)
 
-        # ---- Результаты ----
         res_box = QGroupBox("Результаты")
         res_layout = QVBoxLayout(res_box)
         root_layout.addWidget(res_box)
@@ -659,10 +573,6 @@ class _GAWindow(QWidget):
         self._res_txt.setFont(mono2)
         self._res_txt.setFixedHeight(140)
         res_layout.addWidget(self._res_txt)
-
-    # ------------------------------------------------------------------
-    # Логика UI
-    # ------------------------------------------------------------------
 
     def _on_enc_changed(self, text: str):
         if text == "Вещественное":
@@ -676,48 +586,53 @@ class _GAWindow(QWidget):
 
     def _clear_viz(self):
         self._best_trail.clear()
+        self._particle_trails.clear()
         self._pop_scatter.setData([], [])
         self._best_scatter.setData([], [])
         self._trail_curve.setData([], [])
-        self._info_lbl.setText("")
+        self._ptrl_curve.setData([], [])
 
     def _redraw_viz(self, gen: int, total: int, best_f: float,
                     positions_xy, best_xy):
         if best_xy is not None:
             self._best_trail.append((float(best_xy[0]), float(best_xy[1])))
-            if len(self._best_trail) > self._TRAIL_LEN:
-                del self._best_trail[:-self._TRAIL_LEN]
+            if len(self._best_trail) > self._GBEST_TRAIL_LEN:
+                del self._best_trail[:-self._GBEST_TRAIL_LEN]
 
-        # Trail
         if len(self._best_trail) >= 2:
             tx = [p[0] for p in self._best_trail]
             ty = [p[1] for p in self._best_trail]
             self._trail_curve.setData(tx, ty)
 
-        # Population
         if positions_xy is not None and len(positions_xy) > 0:
+            n = len(positions_xy)
+            if len(self._particle_trails) != n:
+                self._particle_trails = [[] for _ in range(n)]
+            for i, pos in enumerate(positions_xy):
+                self._particle_trails[i].append((float(pos[0]), float(pos[1])))
+                if len(self._particle_trails[i]) > self._INDIVIDUAL_TRAIL_LEN:
+                    self._particle_trails[i] = self._particle_trails[i][-self._INDIVIDUAL_TRAIL_LEN:]
+            px: list[float] = []
+            py: list[float] = []
+            nan = float("nan")
+            for trail in self._particle_trails:
+                if len(trail) >= 2:
+                    for pt in trail:
+                        px.append(pt[0])
+                        py.append(pt[1])
+                    px.append(nan)
+                    py.append(nan)
+            self._ptrl_curve.setData(px, py)
             self._pop_scatter.setData(
                 x=positions_xy[:, 0].tolist(),
                 y=positions_xy[:, 1].tolist(),
             )
 
-        # Best individual
         if best_xy is not None:
             self._best_scatter.setData(
                 x=[float(best_xy[0])],
                 y=[float(best_xy[1])],
             )
-
-        if best_xy is not None:
-            self._info_lbl.setText(
-                f"Поколение: {gen + 1} / {total}\n"
-                f"Лучшее f: {best_f:.4f}\n"
-                f"Лучшая точка: ({best_xy[0]:.2f}, {best_xy[1]:.2f})"
-            )
-
-    # ------------------------------------------------------------------
-    # Запуск / результаты
-    # ------------------------------------------------------------------
 
     def _on_start(self):
         enc_text = self._enc_cb.currentText()
@@ -797,14 +712,12 @@ class _GAWindow(QWidget):
         ]
         self._res_txt.setPlainText("\n".join(lines))
 
-
 def main():
     """Точка входа при запуске `python ga_app.py` — открывает GUI-окно."""
     app = QApplication.instance() or QApplication([])
     window = _GAWindow()
     window.show()
     app.exec()
-
 
 if __name__ == "__main__":
     main()

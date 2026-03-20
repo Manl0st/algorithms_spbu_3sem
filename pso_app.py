@@ -36,24 +36,15 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 
 from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective
 
-# ---------------------------------------------------------------------------
-# Вспомогательные утилиты
-# ---------------------------------------------------------------------------
-
 def _euclidean(x1: float, y1: float, x2: float, y2: float) -> float:
     """Евклидово расстояние между точками (x1,y1) и (x2,y2)."""
     return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
-
-
-# ===========================================================================
-# Вычисление коэффициента сжатия (Clerc-Kennedy)
-# ===========================================================================
 
 def _clerc_chi(c1: float, c2: float) -> float:
     """
@@ -81,11 +72,6 @@ def _clerc_chi(c1: float, c2: float) -> float:
         )
     chi = 2.0 / abs(2.0 - phi - math.sqrt(phi ** 2 - 4.0 * phi))
     return chi
-
-
-# ===========================================================================
-# Основной алгоритм PSO
-# ===========================================================================
 
 def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     """
@@ -118,67 +104,56 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         Статистика по итерациям (внутренние имена столбцов).
     """
 
-    # -- параметры с дефолтами -----------------------------------------------
     mode       = params.get("mode",       "basic")
     n_part     = int(params.get("swarm_size", 30))
     iters      = int(params.get("iters",       300))
     seed       = int(params.get("seed",        42))
     vmax_raw   = params.get("vmax",       None)
     vmax       = float(vmax_raw) if vmax_raw is not None else None
-    # Досрочный останов, когда best_dx < порога (0 = отключён)
+
     stop_eps_dx = float(params.get("stop_eps_dx", 0.0))
-    viz_every   = int(params.get("viz_every",  0))  # 0 = не передавать позиции
+    viz_every   = int(params.get("viz_every",  0))
 
     if mode == "basic":
         w  = float(params.get("w",  0.7))
         c1 = float(params.get("c1", 1.5))
         c2 = float(params.get("c2", 1.5))
-        chi = None  # не используется
-    else:  # constriction
+        chi = None
+    else:
         c1  = float(params.get("c1", 2.05))
         c2  = float(params.get("c2", 2.05))
         chi = _clerc_chi(c1, c2)
-        w   = None  # не используется
+        w   = None
 
-    # -- инициализация --------------------------------------------------------
     rng = np.random.default_rng(seed)
     obj = CounterObjective()
     t_start = time.perf_counter()
 
-    dim = 2  # размерность задачи (x, y)
+    dim = 2
 
-    # FIX: раздельные нижние и верхние границы для каждой переменной
-    lows  = np.array([b[0] for b in BOUNDS])   # [-512, -512]
-    highs = np.array([b[1] for b in BOUNDS])   # [ 512,  512]
+    lows  = np.array([b[0] for b in BOUNDS])
+    highs = np.array([b[1] for b in BOUNDS])
 
-    # Позиции: равномерно в [lows, highs] по каждой переменной
     positions  = rng.uniform(lows, highs, size=(n_part, dim))
 
-    # Скорости: небольшие случайные (±10% диапазона каждой переменной)
     v_init_scales = (highs - lows) * 0.1
     velocities    = rng.uniform(-v_init_scales, v_init_scales, size=(n_part, dim))
 
-    # Оценить начальные позиции
     cur_vals  = np.array([obj(p[0], p[1]) for p in positions])
-    pbest_pos = positions.copy()                 # лучшая позиция частицы
-    pbest_val = cur_vals.copy()                  # значение в pbest
+    pbest_pos = positions.copy()
+    pbest_val = cur_vals.copy()
 
-    # Глобальный лидер
     gbest_idx = int(np.argmin(pbest_val))
     gbest_pos = pbest_pos[gbest_idx].copy()
     gbest_val = float(pbest_val[gbest_idx])
 
-    # -- история --------------------------------------------------------------
     trace_rows = []
 
-    # -- главный цикл ---------------------------------------------------------
     for it in range(iters):
 
-        # 1. Статистика по уже вычисленным значениям cur_vals
         mean_f    = float(np.mean(cur_vals))
-        best_iter = float(np.min(cur_vals))  # лучшее в текущей итерации
+        best_iter = float(np.min(cur_vals))
 
-        # Обновить gbest, если нашли лучше
         if best_iter < gbest_val:
             best_now_idx = int(np.argmin(cur_vals))
             gbest_pos    = positions[best_now_idx].copy()
@@ -195,7 +170,6 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
             "gbest_y":   gbest_pos[1],
         })
 
-        # Подготовить данные для визуализации (только при viz_every)
         positions_xy = None
         gbest_xy_arr = None
         if callback is not None and viz_every > 0 and it % viz_every == 0:
@@ -205,48 +179,40 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         if callback is not None:
             callback(it, iters, gbest_val, positions_xy, gbest_xy_arr)
 
-        # Досрочный останов по близости к истинному минимуму (если включён)
         if stop_eps_dx > 0.0 and best_dx < stop_eps_dx:
             break
 
-        # 2. Обновить pbest для всех частиц
         improved = cur_vals < pbest_val
         pbest_pos[improved] = positions[improved].copy()
         pbest_val[improved] = cur_vals[improved]
 
-        # 3. Обновить скорости и позиции
-        r1 = rng.random(size=(n_part, dim))  # когнитивная случайность
-        r2 = rng.random(size=(n_part, dim))  # социальная случайность
+        r1 = rng.random(size=(n_part, dim))
+        r2 = rng.random(size=(n_part, dim))
 
         if mode == "basic":
-            # v(t+1) = w*v(t) + c1*r1*(pbest - x) + c2*r2*(gbest - x)
+
             velocities = (
                 w * velocities
                 + c1 * r1 * (pbest_pos - positions)
                 + c2 * r2 * (gbest_pos - positions)
             )
         else:
-            # v(t+1) = chi * [v(t) + c1*r1*(pbest - x) + c2*r2*(gbest - x)]
+
             velocities = chi * (
                 velocities
                 + c1 * r1 * (pbest_pos - positions)
                 + c2 * r2 * (gbest_pos - positions)
             )
 
-        # Ограничить скорость (если задан vmax): покомпонентный клиппинг
         if vmax is not None:
             velocities = np.clip(velocities, -vmax, vmax)
 
-        # Обновить позиции
         positions += velocities
 
-        # FIX: клиппинг с раздельными границами по каждой переменной
         positions = np.clip(positions, lows, highs)
 
-        # 4. Вычислить значения для обновлённых позиций
         cur_vals = np.array([obj(p[0], p[1]) for p in positions])
 
-    # -- финальный результат --------------------------------------------------
     final_best_idx = int(np.argmin(cur_vals))
     if cur_vals[final_best_idx] < gbest_val:
         gbest_pos = positions[final_best_idx].copy()
@@ -257,16 +223,16 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     elapsed = time.perf_counter() - t_start
 
     result = {
-        # параметры
+
         "mode":       mode,
         "swarm_size": n_part,
         "iters":      iters,
-        "iters_done": len(trace_rows),  # фактически выполненных итераций
+        "iters_done": len(trace_rows),
         "seed":       seed,
         "c1":         c1,
         "c2":         c2,
         "vmax":       vmax,
-        # результаты
+
         "gbest_x":  float(gbest_pos[0]),
         "gbest_y":  float(gbest_pos[1]),
         "best_f":   gbest_val,
@@ -276,7 +242,6 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
         "time_sec": elapsed,
     }
 
-    # Добавить специфичные для режима параметры
     if mode == "basic":
         result["w"] = w
     else:
@@ -285,19 +250,12 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     trace_df = pd.DataFrame(trace_rows)
     return result, trace_df
 
-
-# ===========================================================================
-# GUI
-# ===========================================================================
-
-# Словари для перевода между человекочитаемыми именами и внутренними значениями
 _MODE_LABELS = {
     "Без коэффициента сжатия":    "basic",
     "С коэффициентом сжатия (χ)": "constriction",
 }
 _MODE_LABELS_INV = {v: k for k, v in _MODE_LABELS.items()}
 
-# Трасса PSO с русскими заголовками столбцов
 _TRACE_RU_COLUMNS = {
     "iter":    "итерация",
     "best_f":  "лучшее_f",
@@ -307,12 +265,11 @@ _TRACE_RU_COLUMNS = {
     "gbest_y": "лучший_y",
 }
 
-
 class _PSOWorker(QThread):
     """Рабочий поток для запуска PSO без блокировки UI."""
 
-    progress = pyqtSignal(int, int, float, object, object)  # it, total, gbest_val, positions_xy, gbest_xy
-    done     = pyqtSignal(dict, object)   # result, trace_df
+    progress = pyqtSignal(int, int, float, object, object)
+    done     = pyqtSignal(dict, object)
     error    = pyqtSignal(str)
 
     def __init__(self, params: dict):
@@ -329,18 +286,19 @@ class _PSOWorker(QThread):
         except Exception as exc:
             self.error.emit(str(exc))
 
-
 class _PSOWindow(QWidget):
     """Главное окно PSO — Eggholder."""
 
-    _TRAIL_LEN = 30
+    _GBEST_TRAIL_LEN = 200
+    _PARTICLE_TRAIL_LEN = 7
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PSO — Eggholder")
         self._best_trail: list[tuple[float, float]] = []
+        self._particle_trails: list[list] = []
         self._worker: _PSOWorker | None = None
-        # Кэш значений w/c1/c2 для каждого режима
+
         self._mode_cache = {
             "basic":        {"w": "0.7",   "c1": "1.5",  "c2": "1.5"},
             "constriction": {"c1": "2.05", "c2": "2.05"},
@@ -348,19 +306,13 @@ class _PSOWindow(QWidget):
         self._current_mode = "basic"
         self._build_ui()
 
-    # ------------------------------------------------------------------
-    # Построение UI
-    # ------------------------------------------------------------------
-
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(8, 8, 8, 8)
 
-        # ---- Верхняя строка: параметры + визуализация ----
         top_row = QHBoxLayout()
         root_layout.addLayout(top_row)
 
-        # Левая колонка: параметры
         params_box = QGroupBox("Параметры PSO")
         params_layout = QFormLayout(params_box)
         params_layout.setContentsMargins(8, 12, 8, 8)
@@ -384,7 +336,6 @@ class _PSOWindow(QWidget):
 
         self._mode_cb.currentTextChanged.connect(self._on_mode_changed)
 
-        # Правая колонка: визуализация
         viz_box = QGroupBox("Визуализация роя")
         viz_layout = QVBoxLayout(viz_box)
         viz_layout.setContentsMargins(6, 12, 6, 6)
@@ -403,35 +354,26 @@ class _PSOWindow(QWidget):
         self._plot.getAxis("left").setLabel("y")
         viz_layout.addWidget(self._plot)
 
-        # Легенда
         legend_lbl = QLabel("● Синие: частицы   ● Оранжевая: лучший   ★ Красная: минимум")
         legend_lbl.setStyleSheet("color: #888888; font-size: 9px;")
         viz_layout.addWidget(legend_lbl)
 
-        # Живая статистика
-        self._info_lbl = QLabel("")
-        mono = QFont("Monospace", 9)
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-        self._info_lbl.setFont(mono)
-        self._info_lbl.setStyleSheet("color: #4488cc;")
-        viz_layout.addWidget(self._info_lbl)
-
-        # Постоянные элементы графика
-        self._swarm_scatter = pg.ScatterPlotItem(size=6,  pen=None, brush=pg.mkBrush("#4488cc"))
-        self._best_scatter  = pg.ScatterPlotItem(size=12, pen=pg.mkPen("#ffffff", width=1),
+        self._swarm_scatter = pg.ScatterPlotItem(size=5,  pen=None, brush=pg.mkBrush("#4488cc"))
+        self._best_scatter  = pg.ScatterPlotItem(size=14, pen=pg.mkPen("#ffffff", width=1),
                                                  brush=pg.mkBrush("#ff8800"))
-        self._trail_curve   = pg.PlotCurveItem(pen=pg.mkPen("#00cc44", width=1.5))
+        self._trail_curve   = pg.PlotCurveItem(pen=pg.mkPen("#ff8800", width=1))
+        self._ptrl_curve    = pg.PlotCurveItem(pen=pg.mkPen((68, 136, 204, 80), width=1))
         self._true_min_sct  = pg.ScatterPlotItem(
             pos=[[TRUE_MIN[0], TRUE_MIN[1]]], size=16,
             symbol="star", pen=pg.mkPen("#ff4444", width=1),
             brush=pg.mkBrush("#ff4444"))
 
+        self._plot.addItem(self._ptrl_curve)
         self._plot.addItem(self._trail_curve)
         self._plot.addItem(self._swarm_scatter)
         self._plot.addItem(self._best_scatter)
         self._plot.addItem(self._true_min_sct)
 
-        # ---- Управление ----
         ctrl_layout = QHBoxLayout()
         root_layout.addLayout(ctrl_layout)
 
@@ -454,7 +396,6 @@ class _PSOWindow(QWidget):
         self._pb_lbl.setStyleSheet("font-size: 8pt;")
         root_layout.addWidget(self._pb_lbl)
 
-        # ---- Результаты ----
         res_box = QGroupBox("Результаты")
         res_layout = QVBoxLayout(res_box)
         root_layout.addWidget(res_box)
@@ -467,21 +408,17 @@ class _PSOWindow(QWidget):
         self._res_txt.setFixedHeight(150)
         res_layout.addWidget(self._res_txt)
 
-    # ------------------------------------------------------------------
-    # Логика UI
-    # ------------------------------------------------------------------
-
     def _on_mode_changed(self, text: str):
         new_mode = _MODE_LABELS.get(text, "basic")
         old_mode = self._current_mode
         if new_mode == old_mode:
             return
-        # Сохранить текущие значения в кэш старого режима
+
         self._mode_cache[old_mode]["c1"] = self._c1_ed.text()
         self._mode_cache[old_mode]["c2"] = self._c2_ed.text()
         if old_mode == "basic":
             self._mode_cache[old_mode]["w"] = self._w_ed.text()
-        # Загрузить значения нового режима
+
         self._current_mode = new_mode
         cached = self._mode_cache[new_mode]
         self._c1_ed.setText(cached["c1"])
@@ -494,48 +431,53 @@ class _PSOWindow(QWidget):
 
     def _clear_viz(self):
         self._best_trail.clear()
+        self._particle_trails.clear()
         self._swarm_scatter.setData([], [])
         self._best_scatter.setData([], [])
         self._trail_curve.setData([], [])
-        self._info_lbl.setText("")
+        self._ptrl_curve.setData([], [])
 
     def _redraw_viz(self, it: int, total: int, gbest_val: float,
                     positions_xy, gbest_xy):
         if gbest_xy is not None:
             self._best_trail.append((float(gbest_xy[0]), float(gbest_xy[1])))
-            if len(self._best_trail) > self._TRAIL_LEN:
-                del self._best_trail[:-self._TRAIL_LEN]
+            if len(self._best_trail) > self._GBEST_TRAIL_LEN:
+                del self._best_trail[:-self._GBEST_TRAIL_LEN]
 
-        # Trail
         if len(self._best_trail) >= 2:
             tx = [p[0] for p in self._best_trail]
             ty = [p[1] for p in self._best_trail]
             self._trail_curve.setData(tx, ty)
 
-        # Swarm
         if positions_xy is not None and len(positions_xy) > 0:
+            n = len(positions_xy)
+            if len(self._particle_trails) != n:
+                self._particle_trails = [[] for _ in range(n)]
+            for i, pos in enumerate(positions_xy):
+                self._particle_trails[i].append((float(pos[0]), float(pos[1])))
+                if len(self._particle_trails[i]) > self._PARTICLE_TRAIL_LEN:
+                    self._particle_trails[i] = self._particle_trails[i][-self._PARTICLE_TRAIL_LEN:]
+            px: list[float] = []
+            py: list[float] = []
+            nan = float("nan")
+            for trail in self._particle_trails:
+                if len(trail) >= 2:
+                    for pt in trail:
+                        px.append(pt[0])
+                        py.append(pt[1])
+                    px.append(nan)
+                    py.append(nan)
+            self._ptrl_curve.setData(px, py)
             self._swarm_scatter.setData(
                 x=positions_xy[:, 0].tolist(),
                 y=positions_xy[:, 1].tolist(),
             )
 
-        # Best particle
         if gbest_xy is not None:
             self._best_scatter.setData(
                 x=[float(gbest_xy[0])],
                 y=[float(gbest_xy[1])],
             )
-
-        if gbest_xy is not None:
-            self._info_lbl.setText(
-                f"Итерация: {it + 1} / {total}\n"
-                f"Лучшее f: {gbest_val:.4f}\n"
-                f"Лучшая точка: ({gbest_xy[0]:.2f}, {gbest_xy[1]:.2f})"
-            )
-
-    # ------------------------------------------------------------------
-    # Запуск / результаты
-    # ------------------------------------------------------------------
 
     def _on_start(self):
         mode_internal = _MODE_LABELS.get(self._mode_cb.currentText(), "basic")
@@ -609,14 +551,12 @@ class _PSOWindow(QWidget):
         lines.append(f"Время         : {r['time_sec']:.3f} с")
         self._res_txt.setPlainText("\n".join(lines))
 
-
 def main():
     """Точка входа при запуске `python pso_app.py` — открывает GUI-окно."""
     app = QApplication.instance() or QApplication([])
     window = _PSOWindow()
     window.show()
     app.exec()
-
 
 if __name__ == "__main__":
     main()
