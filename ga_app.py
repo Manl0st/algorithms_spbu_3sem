@@ -23,6 +23,7 @@ ga_app.py
     result, trace_df = run_ga(params: dict)
 """
 
+import collections
 import json
 import math
 import os
@@ -31,7 +32,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
@@ -459,14 +460,21 @@ class _GAWindow(QWidget):
     """Главное окно ГА — Eggholder."""
 
     _GBEST_TRAIL_LEN = 200
-    _INDIVIDUAL_TRAIL_LEN = 7
+    _STATE_QUEUE_MAX = 150   # максимальный буфер кадров
+    _RENDER_INTERVAL_MS = 100  # ~10 FPS
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ГА — Eggholder")
         self._best_trail: list[tuple[float, float]] = []
-        self._particle_trails: list[list] = []
+        self._state_queue: collections.deque = collections.deque(maxlen=self._STATE_QUEUE_MAX)
+        self._algo_done: bool = False
         self._worker: _GAWorker | None = None
+
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(self._RENDER_INTERVAL_MS)
+        self._render_timer.timeout.connect(self._tick_render)
+
         self._build_ui()
 
     def _build_ui(self):
@@ -528,13 +536,11 @@ class _GAWindow(QWidget):
         self._best_scatter = pg.ScatterPlotItem(size=14, pen=pg.mkPen("#ffffff", width=1),
                                                 brush=pg.mkBrush("#ff8800"))
         self._trail_curve  = pg.PlotCurveItem(pen=pg.mkPen("#ff8800", width=1))
-        self._ptrl_curve   = pg.PlotCurveItem(pen=pg.mkPen((68, 136, 204, 80), width=1))
         self._true_min_sct = pg.ScatterPlotItem(
             pos=[[TRUE_MIN[0], TRUE_MIN[1]]], size=16,
             symbol="star", pen=pg.mkPen("#ff4444", width=1),
             brush=pg.mkBrush("#ff4444"))
 
-        self._plot.addItem(self._ptrl_curve)
         self._plot.addItem(self._trail_curve)
         self._plot.addItem(self._pop_scatter)
         self._plot.addItem(self._best_scatter)
@@ -586,11 +592,11 @@ class _GAWindow(QWidget):
 
     def _clear_viz(self):
         self._best_trail.clear()
-        self._particle_trails.clear()
+        self._state_queue.clear()
+        self._algo_done = False
         self._pop_scatter.setData([], [])
         self._best_scatter.setData([], [])
         self._trail_curve.setData([], [])
-        self._ptrl_curve.setData([], [])
 
     def _redraw_viz(self, gen: int, total: int, best_f: float,
                     positions_xy, best_xy):
@@ -605,24 +611,6 @@ class _GAWindow(QWidget):
             self._trail_curve.setData(tx, ty)
 
         if positions_xy is not None and len(positions_xy) > 0:
-            n = len(positions_xy)
-            if len(self._particle_trails) != n:
-                self._particle_trails = [[] for _ in range(n)]
-            for i, pos in enumerate(positions_xy):
-                self._particle_trails[i].append((float(pos[0]), float(pos[1])))
-                if len(self._particle_trails[i]) > self._INDIVIDUAL_TRAIL_LEN:
-                    self._particle_trails[i] = self._particle_trails[i][-self._INDIVIDUAL_TRAIL_LEN:]
-            px: list[float] = []
-            py: list[float] = []
-            nan = float("nan")
-            for trail in self._particle_trails:
-                if len(trail) >= 2:
-                    for pt in trail:
-                        px.append(pt[0])
-                        py.append(pt[1])
-                    px.append(nan)
-                    py.append(nan)
-            self._ptrl_curve.setData(px, py)
             self._pop_scatter.setData(
                 x=positions_xy[:, 0].tolist(),
                 y=positions_xy[:, 1].tolist(),
@@ -633,6 +621,15 @@ class _GAWindow(QWidget):
                 x=[float(best_xy[0])],
                 y=[float(best_xy[1])],
             )
+
+    def _tick_render(self):
+        """Таймер ~10 FPS: отрисовать один кадр из очереди."""
+        if self._state_queue:
+            gen, total, best_f, positions_xy, best_xy = self._state_queue.popleft()
+            self._redraw_viz(gen, total, best_f, positions_xy, best_xy)
+        elif self._algo_done:
+            self._render_timer.stop()
+            self._run_btn.setEnabled(True)
 
     def _on_start(self):
         enc_text = self._enc_cb.currentText()
@@ -670,6 +667,7 @@ class _GAWindow(QWidget):
         self._worker.done.connect(self._on_done)
         self._worker.error.connect(self._on_error)
         self._worker.start()
+        self._render_timer.start()
 
     def _on_progress(self, gen: int, gens: int, best_f: float,
                      positions_xy, best_xy):
@@ -677,9 +675,10 @@ class _GAWindow(QWidget):
         self._progress_bar.setValue(pct)
         self._pb_lbl.setText(f"Поколение {gen}/{gens},  f = {best_f:.4f}")
         if positions_xy is not None:
-            self._redraw_viz(gen, gens, best_f, positions_xy, best_xy)
+            self._state_queue.append((gen, gens, best_f, positions_xy, best_xy))
 
     def _on_done(self, result: dict, trace_df):
+        self._algo_done = True
         self._status_lbl.setText("Готово")
         self._progress_bar.setValue(100)
         self._show_result(result)
@@ -693,9 +692,10 @@ class _GAWindow(QWidget):
             encoding="utf-8")
         self._pb_lbl.setText(
             "Сохранено: out/ga_last_result.json, out/ga_last_trace.csv")
-        self._run_btn.setEnabled(True)
 
     def _on_error(self, msg: str):
+        self._algo_done = True
+        self._render_timer.stop()
         self._status_lbl.setText("Ошибка")
         QMessageBox.critical(self, "Ошибка", msg)
         self._run_btn.setEnabled(True)
