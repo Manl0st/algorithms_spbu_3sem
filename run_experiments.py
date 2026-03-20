@@ -13,9 +13,9 @@ run_experiments.py
 Откроется GUI-окно для настройки и запуска экспериментов.
 
 Результаты будут сохранены в папке out/:
-  - results.csv          — одна строка на один запуск
-  - traces.csv           — динамика сходимости (все итерации всех запусков)
-  - summary.csv          — агрегированная статистика по конфигурациям
+  - results.csv          — одна строка на один запуск (русские заголовки)
+  - traces.csv           — динамика сходимости (русские заголовки)
+  - summary.csv          — агрегированная статистика по конфигурациям (русские заголовки)
   - experiment_meta.json — метаданные запуска (порог успеха, число повторений и т.д.)
 """
 
@@ -48,13 +48,25 @@ REPEATS: int = 30
 SUCCESS_DX_THRESHOLD: float = 1.0   # единицы расстояния (в координатах x,y)
 
 # ---------------------------------------------------------------------------
+# Человекочитаемые имена вариантов (для отображения в GUI)
+# ---------------------------------------------------------------------------
+_VARIANT_DISPLAY = {
+    "GA_bin_one_point":  "ГА (бинарный, 1-точ. кроссинговер)",
+    "GA_bin_two_point":  "ГА (бинарный, 2-точ. кроссинговер)",
+    "GA_real_arith":     "ГА (вещественный, арифм. кроссинговер)",
+    "PSO_basic_w04":     "PSO базовый (w=0.4)",
+    "PSO_basic_w07":     "PSO базовый (w=0.7)",
+    "PSO_constriction":  "PSO с коэф. сжатия (χ)",
+}
+
+# ---------------------------------------------------------------------------
 # Список конфигураций
 # Каждый словарь — одна конфигурация алгоритма.
 # Ключ "algo" : "GA" или "PSO"
-# Ключ "variant" (опционально): человекочитаемое имя для сводных таблиц/графиков
+# Ключ "variant" (опционально): идентификатор для сводных таблиц/графиков
 # Все остальные ключи передаются напрямую в run_ga() или run_pso()
 # ---------------------------------------------------------------------------
-EXPERIMENTS: list[dict] = [
+EXPERIMENTS: list = [
 
     # --- GA binary: one_point crossover ---
     {
@@ -147,19 +159,7 @@ def _run_one(config: dict, seed: int) -> tuple[dict, pd.DataFrame]:
     """
     Запустить один алгоритм с заданной конфигурацией и seed.
 
-    Параметры
-    ----------
-    config : dict
-        Конфигурация с ключами "algo", "variant" и параметрами алгоритма.
-    seed : int
-        Начальный seed для генератора псевдослучайных чисел.
-
-    Возвращает
-    ----------
-    result : dict
-        Метрики одного запуска.
-    trace_df : pd.DataFrame
-        Трасса сходимости.
+    Возвращает (row: dict, trace_df: pd.DataFrame) — внутренние имена столбцов.
     """
     # Подготовить параметры: убрать служебные ключи, добавить seed
     algo    = config["algo"]
@@ -187,25 +187,26 @@ def _run_one(config: dict, seed: int) -> tuple[dict, pd.DataFrame]:
         dx       = result["dx"]
         df       = result["df"]
         evals    = result["evals"]
-        n_iters  = result["iters"]
+        n_iters  = result["iters_done"]  # FIX: фактически выполненных итераций
     else:
         raise ValueError(f"Неизвестный алгоритм: {algo}")
 
     elapsed = time.perf_counter() - t0
 
     row = {
-        "algo":        algo,
-        "variant":     variant,
-        "params_json": json.dumps(run_params, ensure_ascii=False),
-        "seed":        seed,
-        "best_x":      best_x,
-        "best_y":      best_y,
-        "best_f":      best_f,
-        "dx":          dx,
-        "df":          df,
-        "evals":       evals,
+        "run_id":        None,  # будет заполнено в _run_batch
+        "algo":          algo,
+        "variant":       variant,
+        "params_json":   json.dumps(run_params, ensure_ascii=False),
+        "seed":          seed,
+        "best_x":        best_x,
+        "best_y":        best_y,
+        "best_f":        best_f,
+        "dx":            dx,
+        "df":            df,
+        "evals":         evals,
         "iters_or_gens": n_iters,
-        "time_sec":    elapsed,
+        "time_sec":      elapsed,
     }
     return row, trace_df
 
@@ -214,20 +215,68 @@ def _run_one(config: dict, seed: int) -> tuple[dict, pd.DataFrame]:
 # Пакетный запуск (используется GUI)
 # ===========================================================================
 
+# Соответствие внутренних имён столбцов → русских заголовков для CSV
+_RESULTS_RU = {
+    "run_id":        "id_запуска",
+    "algo":          "алгоритм",
+    "variant":       "вариант",
+    "params_json":   "параметры_json",
+    "seed":          "seed",
+    "best_x":        "лучший_x",
+    "best_y":        "лучший_y",
+    "best_f":        "лучшее_f",
+    "dx":            "dx_до_истины",
+    "df":            "df_ошибка",
+    "evals":         "вычислений_f",
+    "iters_or_gens": "итераций",
+    "time_sec":      "время_сек",
+}
+
+_TRACES_RU = {
+    "run_id":  "id_запуска",
+    "algo":    "алгоритм",
+    "variant": "вариант",
+    "iter":    "итерация",
+    "best_f":  "лучшее_f",
+    "mean_f":  "среднее_f",
+    "best_dx": "dx_лучшей",
+}
+
+_SUMMARY_RU = {
+    "algo":          "алгоритм",
+    "variant":       "вариант",
+    "repeats":       "повторов",
+    "mean_best_f":   "среднее_f",
+    "std_best_f":    "std_f",
+    "median_best_f": "медиана_f",
+    "min_best_f":    "мин_f",
+    "max_best_f":    "макс_f",
+    "mean_dx":       "среднее_dx",
+    "std_dx":        "std_dx",
+    "median_dx":     "медиана_dx",
+    "min_dx":        "мин_dx",
+    "max_dx":        "макс_dx",
+    "success_rate":  "доля_успеха",
+    "mean_time_sec": "среднее_время_сек",
+    "mean_evals":    "среднее_вычислений",
+}
+
+
 def _run_batch(selected_configs: list[dict], repeats: int,
-               success_dx: float, progress_cb) -> tuple[pd.DataFrame,
-                                                         pd.DataFrame,
-                                                         pd.DataFrame]:
+               success_dx: float, progress_cb) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Запустить все выбранные конфигурации и вернуть (results_df, traces_df, summary_df).
 
-    progress_cb(msg: str) вызывается для обновления статуса.
+    Все три DataFrame используют внутренние (английские) имена столбцов.
+    При сохранении в CSV столбцы переименовываются в русские.
+    progress_cb(done: int, total: int, msg: str) вызывается после каждого запуска.
     """
     os.makedirs("out", exist_ok=True)
 
     all_results: list[dict] = []
     all_traces:  list[pd.DataFrame] = []
     run_id = 0
+    total_runs = len(selected_configs) * repeats
 
     for exp_idx, config in enumerate(selected_configs):
         variant = config.get("variant", config.get("algo", "?"))
@@ -237,13 +286,17 @@ def _run_batch(selected_configs: list[dict], repeats: int,
         for rep in range(repeats):
             seed = seed_base + rep
             progress_cb(
+                run_id,
+                total_runs,
                 f"[{exp_idx + 1}/{len(selected_configs)}] "
-                f"{variant},  повторение {rep + 1}/{repeats}"
+                f"{_VARIANT_DISPLAY.get(variant, variant)},  "
+                f"повторение {rep + 1}/{repeats}"
             )
             try:
                 row, trace_df = _run_one(config, seed)
             except Exception as exc:
-                progress_cb(f"ОШИБКА: {exc}")
+                progress_cb(run_id, total_runs, f"ОШИБКА: {exc}")
+                run_id += 1
                 continue
 
             row["run_id"] = run_id
@@ -262,12 +315,15 @@ def _run_batch(selected_configs: list[dict], repeats: int,
     if results_df.empty:
         return results_df, pd.DataFrame(), pd.DataFrame()
 
-    # Упорядочить столбцы
+    # Упорядочить столбцы (внутренние имена)
     cols_order = ["run_id", "algo", "variant", "params_json", "seed",
                   "best_x", "best_y", "best_f", "dx", "df",
                   "evals", "iters_or_gens", "time_sec"]
     results_df = results_df[cols_order]
-    results_df.to_csv(os.path.join("out", "results.csv"), index=False)
+
+    # Сохранить results.csv с русскими заголовками
+    results_df.rename(columns=_RESULTS_RU).to_csv(
+        os.path.join("out", "results.csv"), index=False, encoding="utf-8")
 
     traces_df = pd.DataFrame()
     if all_traces:
@@ -277,9 +333,11 @@ def _run_batch(selected_configs: list[dict], repeats: int,
                        "best_f", "mean_f", "best_dx"]
                       if c in traces_df.columns]
         traces_df = traces_df[trace_cols]
-        traces_df.to_csv(os.path.join("out", "traces.csv"), index=False)
+        # Сохранить traces.csv с русскими заголовками
+        traces_df.rename(columns=_TRACES_RU).to_csv(
+            os.path.join("out", "traces.csv"), index=False, encoding="utf-8")
 
-    # Сводка
+    # Сводка (внутренние имена в памяти, русские при сохранении)
     summary_rows = []
     for variant_name, grp in results_df.groupby("variant", sort=False):
         algo_name = grp["algo"].iloc[0]
@@ -296,12 +354,17 @@ def _run_batch(selected_configs: list[dict], repeats: int,
             "max_best_f":    grp["best_f"].max(),
             "mean_dx":       grp["dx"].mean(),
             "std_dx":        grp["dx"].std(),
+            "median_dx":     grp["dx"].median(),
+            "min_dx":        grp["dx"].min(),
+            "max_dx":        grp["dx"].max(),
             "success_rate":  float(success_mask.sum()) / n,
             "mean_time_sec": grp["time_sec"].mean(),
             "mean_evals":    grp["evals"].mean(),
         })
     summary_df = pd.DataFrame(summary_rows)
-    summary_df.to_csv(os.path.join("out", "summary.csv"), index=False)
+    # Сохранить summary.csv с русскими заголовками
+    summary_df.rename(columns=_SUMMARY_RU).to_csv(
+        os.path.join("out", "summary.csv"), index=False, encoding="utf-8")
 
     meta = {
         "created_at":           datetime.datetime.now().isoformat(
@@ -337,14 +400,15 @@ def main():
     sf = ttk.LabelFrame(root, text="Настройки", padding=8)
     sf.grid(row=0, column=0, padx=10, pady=8, sticky="ew")
 
-    ttk.Label(sf, text="Повторений:").grid(row=0, column=0, sticky="w",
-                                           padx=4, pady=2)
+    ttk.Label(sf, text="Число повторений:").grid(row=0, column=0, sticky="w",
+                                                  padx=4, pady=2)
     rep_var = tk.StringVar(value=str(REPEATS))
     ttk.Entry(sf, textvariable=rep_var, width=10).grid(row=0, column=1,
                                                         sticky="w", padx=4)
 
-    ttk.Label(sf, text="Порог успеха dx:").grid(row=1, column=0, sticky="w",
-                                                 padx=4, pady=2)
+    ttk.Label(sf,
+              text="Порог успеха (dx < порог → «нашёл минимум»):").grid(
+        row=1, column=0, sticky="w", padx=4, pady=2)
     dx_var = tk.StringVar(value=str(SUCCESS_DX_THRESHOLD))
     ttk.Entry(sf, textvariable=dx_var, width=10).grid(row=1, column=1,
                                                        sticky="w", padx=4)
@@ -356,8 +420,9 @@ def main():
     checks: list[tuple[tk.BooleanVar, dict]] = []
     for cfg in EXPERIMENTS:
         var = tk.BooleanVar(value=True)
-        name = cfg.get("variant", cfg.get("algo", "?"))
-        ttk.Checkbutton(vf, text=f"{cfg['algo']} / {name}",
+        internal_name = cfg.get("variant", cfg.get("algo", "?"))
+        display_name  = _VARIANT_DISPLAY.get(internal_name, internal_name)
+        ttk.Checkbutton(vf, text=f"{cfg['algo']} — {display_name}",
                         variable=var).pack(anchor="w")
         checks.append((var, cfg))
 
@@ -386,28 +451,28 @@ def main():
 
     pb_var = tk.IntVar(value=0)
     ttk.Progressbar(cf, variable=pb_var, maximum=100,
-                    length=400, mode="determinate").grid(
+                    length=450, mode="determinate").grid(
         row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
 
     prog_lbl = tk.StringVar(value="")
-    ttk.Label(cf, textvariable=prog_lbl, wraplength=400).grid(
+    ttk.Label(cf, textvariable=prog_lbl, wraplength=450).grid(
         row=3, column=0, columnspan=2, sticky="w", padx=4)
 
     # ---- Сводная таблица ----
-    tf = ttk.LabelFrame(root, text="Сводка результатов (top 5)", padding=8)
+    tf = ttk.LabelFrame(root, text="Сводка результатов (top 6)", padding=8)
     tf.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
 
     tree_cols = ("variant", "mean_best_f", "success_rate",
                  "mean_dx", "mean_evals")
-    tree = ttk.Treeview(tf, columns=tree_cols, show="headings", height=5)
+    tree = ttk.Treeview(tf, columns=tree_cols, show="headings", height=6)
     tree.heading("variant",      text="Вариант")
     tree.heading("mean_best_f",  text="Среднее f")
-    tree.heading("success_rate", text="Успех %")
+    tree.heading("success_rate", text="Доля успеха")
     tree.heading("mean_dx",      text="Среднее dx")
     tree.heading("mean_evals",   text="Вычислений")
-    tree.column("variant",      width=160)
+    tree.column("variant",      width=220)
     tree.column("mean_best_f",  width=100)
-    tree.column("success_rate", width=80)
+    tree.column("success_rate", width=90)
     tree.column("mean_dx",      width=100)
     tree.column("mean_evals",   width=100)
     tree.grid(row=0, column=0, sticky="nsew")
@@ -416,11 +481,13 @@ def main():
     tree.configure(yscrollcommand=sb.set)
 
     def _fill_tree(summary_df: pd.DataFrame):
+        """Заполнить таблицу из summary_df с внутренними именами столбцов."""
         for row in tree.get_children():
             tree.delete(row)
-        for _, r in summary_df.head(5).iterrows():
+        for _, r in summary_df.head(6).iterrows():
+            display = _VARIANT_DISPLAY.get(r["variant"], r["variant"])
             tree.insert("", "end", values=(
-                r["variant"],
+                display,
                 f"{r['mean_best_f']:.4f}",
                 f"{r['success_rate'] * 100:.1f}%",
                 f"{r['mean_dx']:.4f}",
@@ -429,7 +496,7 @@ def main():
 
     def _worker():
         try:
-            repeats   = int(rep_var.get())
+            repeats    = int(rep_var.get())
             success_dx = float(dx_var.get())
         except ValueError as exc:
             q.put(("error", f"Ошибка в параметрах: {exc}"))
@@ -441,11 +508,9 @@ def main():
             return
 
         total_runs = len(selected) * repeats
-        done_runs  = [0]
 
-        def progress_cb(msg: str):
-            done_runs[0] += 1
-            pct = int(done_runs[0] / max(total_runs, 1) * 100)
+        def progress_cb(done: int, total: int, msg: str):
+            pct = min(100, int((done + 1) / max(total, 1) * 100))
             q.put(("progress", msg, pct))
 
         try:
@@ -499,4 +564,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

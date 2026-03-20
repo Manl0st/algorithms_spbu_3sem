@@ -3,26 +3,31 @@ make_plots.py
 =============
 Построение графиков по результатам экспериментов.
 
-Читает файлы:
+Читает файлы (с русскими заголовками):
   - out/results.csv
   - out/traces.csv
   - out/experiment_meta.json  (необязательно; для согласованного порога dx)
 
 Создаёт папку out/plots/ и сохраняет PNG-файлы:
-  1. convergence_mean.png  — средняя кривая best_f(iter) ± std по вариантам
+  1. convergence_mean.png  — средняя кривая best_f(итерация) ± std по вариантам
   2. boxplot_best_f.png    — ящик с усами финального best_f по вариантам
   3. boxplot_dx.png        — ящик с усами dx по вариантам
-  4. success_rate.png      — столбчатая диаграмма success_rate
-  5. scatter_endpoints.png — scatter финальных точек (best_x, best_y) по вариантам
+  4. success_rate.png      — столбчатая диаграмма доли успехов
+  5. scatter_endpoints.png — scatter финальных точек (x, y) по вариантам
 
+Как пользоваться
+----------------
 Запуск (открывает GUI-окно)::
 
     python make_plots.py
+
+Сначала запустите run_experiments.py для получения данных.
 """
 
 import json
 import os
 import queue as _queue
+import sys
 import threading
 
 import matplotlib
@@ -54,54 +59,46 @@ PALETTE = [
     "#e377c2", "#7f7f7f",
 ]
 
+# ---------------------------------------------------------------------------
+# Русские имена столбцов (как в файлах, созданных run_experiments.py)
+# ---------------------------------------------------------------------------
+# results.csv
+_C_VARIANT  = "вариант"
+_C_BEST_X   = "лучший_x"
+_C_BEST_Y   = "лучший_y"
+_C_BEST_F   = "лучшее_f"
+_C_DX       = "dx_до_истины"
+# traces.csv
+_C_ITER     = "итерация"
+_C_TR_BEST_F = "лучшее_f"
+_C_TR_MEAN_F = "среднее_f"
+_C_TR_VARIANT = "вариант"
+
 
 # ===========================================================================
 # Загрузка порога из метаданных эксперимента
 # ===========================================================================
 
-def _load_threshold() -> float:
+def _load_threshold() -> tuple[float, str]:
     """
     Попытаться загрузить SUCCESS_DX_THRESHOLD из experiment_meta.json.
-    Если файл отсутствует или не содержит ключа — вернуть _DEFAULT_DX_THRESHOLD.
+
+    Возвращает (threshold: float, source_info: str).
     """
     if os.path.exists(META_JSON):
         try:
             with open(META_JSON, encoding="utf-8") as fh:
                 meta = json.load(fh)
             threshold = float(meta.get("SUCCESS_DX_THRESHOLD", _DEFAULT_DX_THRESHOLD))
-            print(f"Загружен порог dx из {META_JSON}: {threshold}")
-            return threshold
+            return threshold, f"загружен из {META_JSON}"
         except Exception as err:
-            print(f"Предупреждение: не удалось прочитать {META_JSON}: {err}")
-    else:
-        print(f"Файл {META_JSON} не найден; используется порог по умолчанию "
-              f"{_DEFAULT_DX_THRESHOLD}.")
-    return _DEFAULT_DX_THRESHOLD
+            return _DEFAULT_DX_THRESHOLD, f"ошибка чтения {META_JSON}: {err}"
+    return _DEFAULT_DX_THRESHOLD, f"файл {META_JSON} не найден, используется значение по умолчанию"
 
 
 # ===========================================================================
 # Вспомогательные утилиты
 # ===========================================================================
-
-def _load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Загрузить results.csv и traces.csv; завершить с ошибкой, если нет файлов."""
-    if not os.path.exists(RESULTS_CSV):
-        sys.exit(
-            f"Файл '{RESULTS_CSV}' не найден. "
-            "Сначала запустите run_experiments.py"
-        )
-    if not os.path.exists(TRACES_CSV):
-        print(
-            f"Предупреждение: файл '{TRACES_CSV}' не найден. "
-            "Графики сходимости строиться не будут."
-        )
-        results = pd.read_csv(RESULTS_CSV)
-        return results, pd.DataFrame()
-
-    results = pd.read_csv(RESULTS_CSV)
-    traces  = pd.read_csv(TRACES_CSV)
-    return results, traces
-
 
 def _color_map(variants: list[str]) -> dict:
     """Назначить цвет каждому варианту."""
@@ -122,19 +119,20 @@ def _save_fig(fig: plt.Figure, name: str) -> None:
 
 def plot_convergence(traces: pd.DataFrame, colors: dict) -> None:
     """
-    Построить средние кривые сходимости best_f(iter) с полосой ±std.
+    Построить средние кривые сходимости best_f(итерация) с полосой ±std.
 
-    По оси X — номер итерации/поколения.
-    По оси Y — лучшее найденное значение best_f.
+    Корректно обрабатывает запуски с разным числом итераций:
+    groupby("итерация") усредняет только по существующим значениям.
     """
-    variants = traces["variant"].unique()
+    variants = traces[_C_TR_VARIANT].unique()
     fig, ax  = plt.subplots(figsize=(10, 6))
 
     for variant in variants:
-        sub = traces[traces["variant"] == variant]
-        # Агрегировать по iter: mean и std
-        agg = sub.groupby("iter")["best_f"].agg(["mean", "std"]).reset_index()
-        x   = agg["iter"].values
+        sub = traces[traces[_C_TR_VARIANT] == variant]
+        # Агрегировать по итерации: mean и std
+        agg = sub.groupby(_C_ITER)[_C_TR_BEST_F].agg(["mean", "std"]).reset_index()
+        agg["std"] = agg["std"].fillna(0.0)  # FIX: NaN при одном запуске → 0
+        x   = agg[_C_ITER].values
         y   = agg["mean"].values
         s   = agg["std"].values
 
@@ -162,11 +160,9 @@ def plot_convergence(traces: pd.DataFrame, colors: dict) -> None:
 def plot_boxplot_best_f(results: pd.DataFrame, colors: dict) -> None:
     """
     Ящик с усами финального значения best_f по вариантам.
-
-    Позволяет сравнить качество решения и разброс между запусками.
     """
-    variants = results["variant"].unique()
-    data     = [results[results["variant"] == v]["best_f"].values for v in variants]
+    variants = results[_C_VARIANT].unique()
+    data     = [results[results[_C_VARIANT] == v][_C_BEST_F].values for v in variants]
 
     fig, ax  = plt.subplots(figsize=(max(6, len(variants) * 1.4), 6))
     bp       = ax.boxplot(data, patch_artist=True, notch=False,
@@ -180,7 +176,7 @@ def plot_boxplot_best_f(results: pd.DataFrame, colors: dict) -> None:
                label=f"f* = {TRUE_F:.2f}")
     ax.set_xticks(range(1, len(variants) + 1))
     ax.set_xticklabels(variants, rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel("Финальное best_f", fontsize=12)
+    ax.set_ylabel("Финальное лучшее f", fontsize=12)
     ax.set_title("Распределение финального значения f по вариантам", fontsize=13)
     ax.legend(fontsize=9)
     ax.grid(True, axis="y", alpha=0.3)
@@ -196,8 +192,8 @@ def plot_boxplot_dx(results: pd.DataFrame, colors: dict, threshold: float) -> No
     """
     Ящик с усами расстояния до истинного минимума (dx) по вариантам.
     """
-    variants = results["variant"].unique()
-    data     = [results[results["variant"] == v]["dx"].values for v in variants]
+    variants = results[_C_VARIANT].unique()
+    data     = [results[results[_C_VARIANT] == v][_C_DX].values for v in variants]
 
     fig, ax  = plt.subplots(figsize=(max(6, len(variants) * 1.4), 6))
     bp       = ax.boxplot(data, patch_artist=True, notch=False,
@@ -227,9 +223,9 @@ def plot_success_rate(results: pd.DataFrame, colors: dict, threshold: float) -> 
     """
     Столбчатая диаграмма доли успешных запусков (dx < порог) по вариантам.
     """
-    variants = results["variant"].unique()
+    variants = results[_C_VARIANT].unique()
     rates    = [
-        (results[results["variant"] == v]["dx"] < threshold).mean()
+        (results[results[_C_VARIANT] == v][_C_DX] < threshold).mean()
         for v in variants
     ]
 
@@ -261,18 +257,15 @@ def plot_success_rate(results: pd.DataFrame, colors: dict, threshold: float) -> 
 
 def plot_scatter_endpoints(results: pd.DataFrame, colors: dict) -> None:
     """
-    Scatter-диаграмма финальных точек (best_x, best_y) по вариантам.
-
-    Позволяет визуально оценить, насколько алгоритмы находят
-    глобальный минимум (отмечен звёздочкой).
+    Scatter-диаграмма финальных точек (x, y) по вариантам.
     """
-    variants = results["variant"].unique()
+    variants = results[_C_VARIANT].unique()
     fig, ax  = plt.subplots(figsize=(9, 7))
 
     for variant in variants:
-        sub   = results[results["variant"] == variant]
+        sub   = results[results[_C_VARIANT] == variant]
         color = colors.get(variant, "#aaaaaa")
-        ax.scatter(sub["best_x"], sub["best_y"],
+        ax.scatter(sub[_C_BEST_X], sub[_C_BEST_Y],
                    label=variant, color=color, alpha=0.6, s=40, edgecolors="none")
 
     # Истинный минимум
@@ -296,8 +289,11 @@ def main():
     """Точка входа при запуске `python make_plots.py` — открывает GUI-окно."""
     q: _queue.Queue = _queue.Queue()
 
+    # Загрузить порог при старте
+    _init_threshold, _thresh_source = _load_threshold()
+
     root = tk.Tk()
-    root.title("Построение графиков")
+    root.title("Построение графиков — Eggholder")
     root.resizable(False, False)
 
     # ---- Файлы ввода ----
@@ -308,7 +304,7 @@ def main():
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
                                            padx=4, pady=2)
         var = tk.StringVar(value=default)
-        ttk.Entry(parent, textvariable=var, width=38).grid(row=row, column=1,
+        ttk.Entry(parent, textvariable=var, width=40).grid(row=row, column=1,
                                                             sticky="w", padx=4)
         def _browse():
             path = filedialog.askopenfilename(
@@ -329,11 +325,15 @@ def main():
     sf = ttk.LabelFrame(root, text="Настройки", padding=8)
     sf.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
 
-    ttk.Label(sf, text="Порог успеха dx:").grid(row=0, column=0, sticky="w",
-                                                 padx=4, pady=2)
-    dx_var = tk.StringVar(value=str(_load_threshold()))
+    ttk.Label(sf, text="Порог успеха (dx < порог → «нашёл минимум»):").grid(
+        row=0, column=0, sticky="w", padx=4, pady=2)
+    dx_var = tk.StringVar(value=str(_init_threshold))
     ttk.Entry(sf, textvariable=dx_var, width=12).grid(row=0, column=1,
                                                        sticky="w", padx=4)
+    thresh_info_var = tk.StringVar(value=f"Источник: {_thresh_source}")
+    ttk.Label(sf, textvariable=thresh_info_var,
+              font=("", 8), foreground="#555555").grid(
+        row=1, column=0, columnspan=2, sticky="w", padx=4)
 
     # ---- Управление ----
     cf = ttk.Frame(root, padding=8)
@@ -350,7 +350,7 @@ def main():
     lf = ttk.LabelFrame(root, text="Созданные файлы", padding=8)
     lf.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
 
-    files_txt = tk.Text(lf, height=6, width=56, state="disabled",
+    files_txt = tk.Text(lf, height=6, width=60, state="disabled",
                         font=("Courier", 9))
     files_txt.grid(row=0, column=0, sticky="nsew")
 
@@ -383,7 +383,7 @@ def main():
                        if os.path.exists(traces_path) else pd.DataFrame())
 
             os.makedirs(PLOTS_DIR, exist_ok=True)
-            variants = list(results["variant"].unique())
+            variants = list(results[_C_VARIANT].unique())
             colors   = _color_map(variants)
 
             if not traces.empty:
@@ -433,4 +433,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
