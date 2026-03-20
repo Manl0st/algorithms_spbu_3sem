@@ -2,15 +2,13 @@
 run_experiments.py
 ==================
 Пакетный запуск экспериментов для сравнения алгоритмов GA и PSO
-на функции Eggholder.
+на функции Eggholder (CLI, без GUI).
 
 Как использовать
 ----------------
 Запустите::
 
     python run_experiments.py
-
-Откроется GUI-окно для настройки и запуска экспериментов.
 
 Результаты будут сохранены в папке out/:
   - results.csv          — одна строка на один запуск (русские заголовки)
@@ -22,15 +20,10 @@ run_experiments.py
 import datetime
 import json
 import os
-import queue as _queue
-import subprocess
-import threading
 import time
 
 import numpy as np
 import pandas as pd
-import tkinter as tk
-from tkinter import ttk, messagebox
 
 # Импортируем алгоритмы из соседних файлов
 from ga_app  import run_ga
@@ -385,181 +378,43 @@ def _run_batch(selected_configs: list[dict], repeats: int,
 
 
 # ===========================================================================
-# GUI
+# CLI
 # ===========================================================================
 
 def main():
-    """Точка входа при запуске `python run_experiments.py` — открывает GUI."""
-    q: _queue.Queue = _queue.Queue()
+    """CLI-запуск: все конфигурации с фиксированными сидами."""
+    # Фиксированные параметры для воспроизводимых исследовательских данных
+    REPEATS_CLI = 30
+    SEED_BASE   = 1001   # сиды: 1001, 1002, …, 1030
 
-    root = tk.Tk()
-    root.title("Пакетные эксперименты — Eggholder")
-    root.resizable(False, False)
+    # Добавляем seed_base ко всем конфигурациям
+    configs = [{**cfg, "seed_base": SEED_BASE} for cfg in EXPERIMENTS]
 
-    # ---- Настройки ----
-    sf = ttk.LabelFrame(root, text="Настройки", padding=8)
-    sf.grid(row=0, column=0, padx=10, pady=8, sticky="ew")
+    total_runs = len(configs) * REPEATS_CLI
+    print(f"Запуск экспериментов: {len(configs)} вариантов × {REPEATS_CLI} повторений")
+    print(f"Всего запусков: {total_runs}")
+    print()
 
-    ttk.Label(sf, text="Число повторений:").grid(row=0, column=0, sticky="w",
-                                                  padx=4, pady=2)
-    rep_var = tk.StringVar(value=str(REPEATS))
-    ttk.Entry(sf, textvariable=rep_var, width=10).grid(row=0, column=1,
-                                                        sticky="w", padx=4)
+    done_count = [0]
 
-    ttk.Label(sf,
-              text="Порог успеха (dx < порог → «нашёл минимум»):").grid(
-        row=1, column=0, sticky="w", padx=4, pady=2)
-    dx_var = tk.StringVar(value=str(SUCCESS_DX_THRESHOLD))
-    ttk.Entry(sf, textvariable=dx_var, width=10).grid(row=1, column=1,
-                                                       sticky="w", padx=4)
+    def progress_cb(done: int, total: int, msg: str):
+        done_count[0] += 1
+        print(f"  [{done_count[0]:3d}/{total_runs}] {msg}")
 
-    # ---- Варианты ----
-    vf = ttk.LabelFrame(root, text="Варианты экспериментов", padding=8)
-    vf.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+    results_df, _traces_df, summary_df = _run_batch(
+        configs, REPEATS_CLI, SUCCESS_DX_THRESHOLD, progress_cb)
 
-    checks: list[tuple[tk.BooleanVar, dict]] = []
-    for cfg in EXPERIMENTS:
-        var = tk.BooleanVar(value=True)
-        internal_name = cfg.get("variant", cfg.get("algo", "?"))
-        display_name  = _VARIANT_DISPLAY.get(internal_name, internal_name)
-        ttk.Checkbutton(vf, text=f"{cfg['algo']} — {display_name}",
-                        variable=var).pack(anchor="w")
-        checks.append((var, cfg))
-
-    # ---- Управление ----
-    cf = ttk.Frame(root, padding=8)
-    cf.grid(row=2, column=0, sticky="ew")
-
-    run_btn = ttk.Button(cf, text="Запустить")
-    run_btn.grid(row=0, column=0, padx=4, pady=4)
-
-    def _open_out():
-        folder = os.path.abspath("out")
-        os.makedirs(folder, exist_ok=True)
-        if os.name == "nt":
-            os.startfile(folder)
-        else:
-            subprocess.Popen(["xdg-open", folder])
-
-    ttk.Button(cf, text="Открыть папку out",
-               command=_open_out).grid(row=0, column=1, padx=4)
-
-    status_var = tk.StringVar(value="Готово")
-    ttk.Label(cf, textvariable=status_var,
-              font=("", 10, "bold")).grid(row=1, column=0, columnspan=2,
-                                          sticky="w", padx=4)
-
-    pb_var = tk.IntVar(value=0)
-    ttk.Progressbar(cf, variable=pb_var, maximum=100,
-                    length=450, mode="determinate").grid(
-        row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
-
-    prog_lbl = tk.StringVar(value="")
-    ttk.Label(cf, textvariable=prog_lbl, wraplength=450).grid(
-        row=3, column=0, columnspan=2, sticky="w", padx=4)
-
-    # ---- Сводная таблица ----
-    tf = ttk.LabelFrame(root, text="Сводка результатов (top 6)", padding=8)
-    tf.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
-
-    tree_cols = ("variant", "mean_best_f", "success_rate",
-                 "mean_dx", "mean_evals")
-    tree = ttk.Treeview(tf, columns=tree_cols, show="headings", height=6)
-    tree.heading("variant",      text="Вариант")
-    tree.heading("mean_best_f",  text="Среднее f")
-    tree.heading("success_rate", text="Доля успеха")
-    tree.heading("mean_dx",      text="Среднее dx")
-    tree.heading("mean_evals",   text="Вычислений")
-    tree.column("variant",      width=220)
-    tree.column("mean_best_f",  width=100)
-    tree.column("success_rate", width=90)
-    tree.column("mean_dx",      width=100)
-    tree.column("mean_evals",   width=100)
-    tree.grid(row=0, column=0, sticky="nsew")
-    sb = ttk.Scrollbar(tf, orient="vertical", command=tree.yview)
-    sb.grid(row=0, column=1, sticky="ns")
-    tree.configure(yscrollcommand=sb.set)
-
-    def _fill_tree(summary_df: pd.DataFrame):
-        """Заполнить таблицу из summary_df с внутренними именами столбцов."""
-        for row in tree.get_children():
-            tree.delete(row)
-        for _, r in summary_df.head(6).iterrows():
-            display = _VARIANT_DISPLAY.get(r["variant"], r["variant"])
-            tree.insert("", "end", values=(
-                display,
-                f"{r['mean_best_f']:.4f}",
-                f"{r['success_rate'] * 100:.1f}%",
-                f"{r['mean_dx']:.4f}",
-                f"{r['mean_evals']:.0f}",
-            ))
-
-    def _worker():
-        try:
-            repeats    = int(rep_var.get())
-            success_dx = float(dx_var.get())
-        except ValueError as exc:
-            q.put(("error", f"Ошибка в параметрах: {exc}"))
-            return
-
-        selected = [cfg for var, cfg in checks if var.get()]
-        if not selected:
-            q.put(("error", "Не выбрано ни одного варианта."))
-            return
-
-        total_runs = len(selected) * repeats
-
-        def progress_cb(done: int, total: int, msg: str):
-            pct = min(100, int((done + 1) / max(total, 1) * 100))
-            q.put(("progress", msg, pct))
-
-        try:
-            results_df, traces_df, summary_df = _run_batch(
-                selected, repeats, success_dx, progress_cb)
-            q.put(("done", summary_df))
-        except Exception as exc:
-            q.put(("error", str(exc)))
-
-    def _start():
-        run_btn.config(state="disabled")
-        pb_var.set(0)
-        prog_lbl.set("")
-        status_var.set("Выполняется…")
-        for row in tree.get_children():
-            tree.delete(row)
-        threading.Thread(target=_worker, daemon=True).start()
-        root.after(100, _poll)
-
-    def _poll():
-        try:
-            while True:
-                msg = q.get_nowait()
-                if msg[0] == "progress":
-                    _, text, pct = msg
-                    pb_var.set(pct)
-                    prog_lbl.set(text)
-                elif msg[0] == "done":
-                    summary_df = msg[1]
-                    status_var.set("Готово")
-                    pb_var.set(100)
-                    prog_lbl.set(
-                        "Сохранено: out/results.csv, out/traces.csv, "
-                        "out/summary.csv, out/experiment_meta.json")
-                    if not summary_df.empty:
-                        _fill_tree(summary_df)
-                    run_btn.config(state="normal")
-                    return
-                elif msg[0] == "error":
-                    status_var.set("Ошибка")
-                    messagebox.showerror("Ошибка", msg[1])
-                    run_btn.config(state="normal")
-                    return
-        except _queue.Empty:
-            pass
-        root.after(100, _poll)
-
-    run_btn.config(command=_start)
-    root.mainloop()
+    if not results_df.empty:
+        print()
+        print("=== Сводка ===")
+        for _, row in summary_df.iterrows():
+            display = _VARIANT_DISPLAY.get(row["variant"], row["variant"])
+            print(f"  {display}:  среднее f = {row['mean_best_f']:.4f},  "
+                  f"доля успеха = {row['success_rate'] * 100:.1f}%")
+        print()
+        print("Файлы сохранены в папке out/")
+    else:
+        print("Нет результатов!")
 
 
 if __name__ == "__main__":
