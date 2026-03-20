@@ -27,7 +27,6 @@ import json
 import math
 import os
 import queue as _queue
-import subprocess
 import threading
 import time
 
@@ -510,40 +509,28 @@ def main():
     root.resizable(False, False)
 
     # =========================================================================
-    # Переменные параметров
+    # Переменные параметров (только ключевые)
     # =========================================================================
-    # Основные параметры
-    enc_var  = tk.StringVar(value="Бинарное")
-    pop_var  = tk.StringVar(value="50")
-    gen_var  = tk.StringVar(value="300")
-    cxr_var  = tk.StringVar(value="0.9")
-    mut_var  = tk.StringVar(value="0.02")
-    show_viz_var  = tk.BooleanVar(value=True)
-    viz_every_var = tk.StringVar(value="10")
-
-    # Дополнительные параметры
-    bits_var  = tk.StringVar(value="20")
-    cx_var    = tk.StringVar(value="Одноточечный")
-    tk_var    = tk.StringVar(value="3")
-    eli_var   = tk.StringVar(value="1")
-    seed_var  = tk.StringVar(value="42")
-    epsf_var  = tk.StringVar(value="1e-6")
-    epsdx_var = tk.StringVar(value="0.0")
-    pat_var   = tk.StringVar(value="80")
+    enc_var = tk.StringVar(value="Бинарное")
+    cx_var  = tk.StringVar(value="Одноточечный")
+    tk_var  = tk.StringVar(value="3")
+    eli_var = tk.StringVar(value="1")
+    pop_var = tk.StringVar(value="50")
+    gen_var = tk.StringVar(value="300")
+    cxr_var = tk.StringVar(value="0.9")
+    mut_var = tk.StringVar(value="0.02")
 
     # =========================================================================
-    # Основной контейнер
+    # Основной контейнер (2 колонки: параметры + визуализация)
     # =========================================================================
     main_frame = ttk.Frame(root)
     main_frame.grid(row=0, column=0, sticky="nsew")
 
-    # =========================================================================
-    # Левая колонка — вкладки параметров (ttk.Notebook)
-    # =========================================================================
-    nb = ttk.Notebook(main_frame)
-    nb.grid(row=0, column=0, padx=10, pady=8, sticky="nsew")
+    # ----- Левая колонка: параметры -----
+    pf = ttk.LabelFrame(main_frame, text="Параметры ГА", padding=8)
+    pf.grid(row=0, column=0, padx=(10, 5), pady=8, sticky="nw")
 
-    def _field(parent, row, label, var, choices=None, width=22):
+    def _field(parent, row, label, var, choices=None, width=18):
         ttk.Label(parent, text=label).grid(
             row=row, column=0, sticky="w", padx=4, pady=3)
         if choices:
@@ -554,64 +541,30 @@ def main():
         wgt.grid(row=row, column=1, sticky="w", padx=4, pady=3)
         return wgt
 
-    # ----- Вкладка «Основные» -----
-    tab_main = ttk.Frame(nb, padding=8)
-    nb.add(tab_main, text="  Основные  ")
-
-    _field(tab_main, 0, "Кодирование:", enc_var, list(_ENC_LABELS.keys()))
-    _field(tab_main, 1, "Размер популяции:", pop_var)
-    _field(tab_main, 2, "Число поколений:", gen_var)
-    _field(tab_main, 3, "Вероятность кроссинговера:", cxr_var)
-    _field(tab_main, 4, "Вероятность мутации:", mut_var)
-    ttk.Separator(tab_main, orient="horizontal").grid(
-        row=5, column=0, columnspan=2, sticky="ew", pady=5)
-    ttk.Label(tab_main, text="Визуализация:", font=("", 9, "bold")).grid(
-        row=6, column=0, sticky="w", padx=4, pady=(4, 2))
-    ttk.Checkbutton(tab_main, text="Показывать визуализацию",
-                    variable=show_viz_var).grid(
-        row=7, column=0, columnspan=2, sticky="w", padx=8)
-    ttk.Label(tab_main, text="Обновление каждые N поколений:").grid(
-        row=8, column=0, sticky="w", padx=4, pady=2)
-    ttk.Entry(tab_main, textvariable=viz_every_var, width=8).grid(
-        row=8, column=1, sticky="w", padx=4)
-
-    # ----- Вкладка «Дополнительно» -----
-    tab_adv = ttk.Frame(nb, padding=8)
-    nb.add(tab_adv, text="  Дополнительно  ")
-
-    bits_entry = _field(tab_adv, 0,
-                        "Бит на переменную\n(точность двоичного кодирования):",
-                        bits_var)
-    cx_cb = _field(tab_adv, 1, "Тип кроссинговера:", cx_var,
+    _field(pf, 0, "Тип кодирования:",    enc_var, list(_ENC_LABELS.keys()))
+    cx_cb = _field(pf, 1, "Тип кроссинговера:", cx_var,
                    list(_CX_BIN_LABELS.keys()))
-    _field(tab_adv, 2, "Размер турнира отбора:", tk_var)
-    _field(tab_adv, 3, "Элитизм (число лучших):", eli_var)
-    _field(tab_adv, 4, "Сид (seed):", seed_var)
-    _field(tab_adv, 5, "Порог улучшения по f (ε_f):", epsf_var)
-    _field(tab_adv, 6, "Останов ε_dx (0 = выкл.):", epsdx_var)
-    _field(tab_adv, 7, "Терпение (поколений без улучшения):", pat_var)
+    _field(pf, 2, "Размер турнира:",      tk_var)
+    _field(pf, 3, "Элитизм:",             eli_var)
+    _field(pf, 4, "Размер популяции:",    pop_var)
+    _field(pf, 5, "Число поколений:",     gen_var)
+    _field(pf, 6, "Вер. кроссинговера:",  cxr_var)
+    _field(pf, 7, "Вер. мутации:",        mut_var)
 
-    # =========================================================================
-    # Колбэки
-    # =========================================================================
     def _on_enc(*_):
         if enc_var.get() == "Вещественное":
-            bits_entry.config(state="disabled")
             cx_var.set("Арифметический")
             cx_cb.config(state="disabled", values=list(_CX_REAL_LABELS.keys()))
         else:
-            bits_entry.config(state="normal")
             cx_cb.config(state="readonly", values=list(_CX_BIN_LABELS.keys()))
             if cx_var.get() not in _CX_BIN_LABELS:
                 cx_var.set("Одноточечный")
 
     enc_var.trace_add("write", _on_enc)
 
-    # =========================================================================
-    # Правая колонка — визуализация популяции
-    # =========================================================================
+    # ----- Правая колонка: визуализация -----
     vf = ttk.LabelFrame(main_frame, text="Визуализация популяции", padding=4)
-    vf.grid(row=0, column=1, padx=10, pady=8, sticky="n")
+    vf.grid(row=0, column=1, padx=(5, 10), pady=8, sticky="n")
 
     viz_canvas = tk.Canvas(vf, width=_VIZ_SIZE, height=_VIZ_SIZE,
                            bg="#1a1a2e", highlightthickness=1,
@@ -623,41 +576,17 @@ def main():
     viz_canvas.create_text(_TRUE_CX, _TRUE_CY, text="★",
                             fill="#ff4444", font=("", 14, "bold"), tags="true_min")
 
-    # Легенда
-    leg_canvas = tk.Canvas(vf, width=_VIZ_SIZE, height=52,
-                           bg="#f0f0f0", highlightthickness=0)
-    leg_canvas.grid(row=1, column=0, sticky="ew", padx=0, pady=(4, 0))
-    leg_canvas.create_text(8, 10, text="Легенда:", anchor="w",
-                           font=("", 8, "bold"), fill="#333333")
-    _leg_items = [
-        (14, 28, "#4488cc", "oval", "Особи популяции"),
-        (14, 44, "#00aa44", "oval", "След лучшей особи"),
-        (_VIZ_SIZE // 2 + 14, 28, "#ff8800", "oval", "Лучшая особь"),
-        (_VIZ_SIZE // 2 + 14, 44, "#ff4444", "star", "Истинный минимум"),
-    ]
-    for lx, ly, lc, ltype, ltxt in _leg_items:
-        if ltype == "star":
-            leg_canvas.create_text(lx, ly, text="★", fill=lc,
-                                   font=("", 10, "bold"), anchor="w")
-        else:
-            leg_canvas.create_oval(lx - 4, ly - 4, lx + 4, ly + 4,
-                                   fill=lc, outline="")
-        leg_canvas.create_text(lx + 14, ly, text=ltxt,
-                               fill="#333333", font=("", 8), anchor="w")
-
-    # Пояснительный текст
+    # Легенда (минимальная)
     ttk.Label(vf,
-              text="Синие — популяция, оранжевая — лучшая особь, зелёные — след,\n"
-                   "красная ★ — истинный глобальный минимум.",
-              font=("", 8), foreground="#777777",
-              wraplength=_VIZ_SIZE).grid(row=2, column=0, sticky="w",
-                                         padx=4, pady=(2, 0))
+              text="● Синие: особи   ● Оранжевая: лучший   ★ Красная: минимум",
+              font=("", 8), foreground="#555555").grid(
+        row=1, column=0, sticky="w", padx=2, pady=(2, 0))
 
     # Живая статистика
     info_var = tk.StringVar(value="")
     ttk.Label(vf, textvariable=info_var, font=("Courier", 9),
-              foreground="#225599").grid(row=3, column=0, sticky="w",
-                                         padx=4, pady=(4, 2))
+              foreground="#225599").grid(row=2, column=0, sticky="w",
+                                         padx=4, pady=(2, 4))
 
     # Буфер следа лучшей особи (последние N точек)
     _best_trail: list = []
@@ -668,14 +597,12 @@ def main():
         """Перерисовать холст с текущей популяцией, следом и статистикой."""
         viz_canvas.delete("pop")
 
-        # Обновить буфер следа
         if best_xy is not None:
             tx, ty = _world_to_canvas(best_xy[0], best_xy[1])
             _best_trail.append((tx, ty))
             if len(_best_trail) > _TRAIL_LEN:
                 del _best_trail[:-_TRAIL_LEN]
 
-        # Нарисовать след (постепенно ярче к последней точке)
         n = len(_best_trail)
         for i, (tx, ty) in enumerate(_best_trail):
             frac = (i + 1) / max(n, 1)
@@ -685,14 +612,12 @@ def main():
             viz_canvas.create_oval(tx - r_t, ty - r_t, tx + r_t, ty + r_t,
                                    fill=trail_color, outline="", tags="pop")
 
-        # Особи популяции
         if positions_xy is not None:
             for xi, yi in positions_xy:
                 cx, cy = _world_to_canvas(xi, yi)
                 viz_canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
                                        fill="#4488cc", outline="", tags="pop")
 
-        # Лучшая особь
         if best_xy is not None:
             bx_c, by_c = _world_to_canvas(best_xy[0], best_xy[1])
             viz_canvas.create_oval(bx_c - 6, by_c - 6, bx_c + 6, by_c + 6,
@@ -701,18 +626,14 @@ def main():
 
         viz_canvas.tag_raise("true_min")
 
-        # Обновить живую статистику
         if best_xy is not None:
-            dx_live = _euclidean(best_xy[0], best_xy[1],
-                                 TRUE_MIN[0], TRUE_MIN[1])
             info_var.set(
-                f"Поколение: {gen + 1} / {total}    best f = {best_f:.4f}\n"
-                f"Лучший (x, y) = ({best_xy[0]:.2f}, {best_xy[1]:.2f})\n"
-                f"dx до минимума = {dx_live:.4f}"
+                f"Поколение: {gen + 1} / {total}\n"
+                f"Лучшее f: {best_f:.4f}\n"
+                f"Лучшая точка: ({best_xy[0]:.2f}, {best_xy[1]:.2f})"
             )
 
     def _clear_viz():
-        """Очистить холст и буфер следа перед новым запуском."""
         _best_trail.clear()
         viz_canvas.delete("pop")
         info_var.set("")
@@ -726,30 +647,18 @@ def main():
     run_btn = ttk.Button(cf, text="▶  Запустить")
     run_btn.grid(row=0, column=0, padx=4, pady=4)
 
-    def _open_out():
-        folder = os.path.abspath("out")
-        os.makedirs(folder, exist_ok=True)
-        if os.name == "nt":
-            os.startfile(folder)
-        else:
-            subprocess.Popen(["xdg-open", folder])
-
-    ttk.Button(cf, text="Открыть папку out",
-               command=_open_out).grid(row=0, column=1, padx=4)
-
     status_var = tk.StringVar(value="Готово")
     ttk.Label(cf, textvariable=status_var,
-              font=("", 10, "bold")).grid(row=1, column=0, columnspan=2,
-                                          sticky="w", padx=4)
+              font=("", 10, "bold")).grid(row=0, column=1, sticky="w", padx=8)
 
     pb_var = tk.IntVar(value=0)
     ttk.Progressbar(cf, variable=pb_var, maximum=100,
-                    length=450, mode="determinate").grid(
-        row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
+                    length=400, mode="determinate").grid(
+        row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
 
     pb_lbl = tk.StringVar(value="")
-    ttk.Label(cf, textvariable=pb_lbl).grid(row=3, column=0, columnspan=2,
-                                             sticky="w", padx=4)
+    ttk.Label(cf, textvariable=pb_lbl, font=("", 8)).grid(
+        row=2, column=0, columnspan=2, sticky="w", padx=4)
 
     # =========================================================================
     # Результаты
@@ -757,7 +666,7 @@ def main():
     rf = ttk.LabelFrame(root, text="Результаты", padding=8)
     rf.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
 
-    res_txt = tk.Text(rf, height=7, width=60, state="disabled",
+    res_txt = tk.Text(rf, height=7, width=70, state="disabled",
                       font=("Courier", 9))
     res_txt.grid(row=0, column=0, sticky="nsew")
 
@@ -798,26 +707,16 @@ def main():
             else:
                 cx_internal = _CX_REAL_LABELS.get(cx_label, "arithmetic")
 
-            try:
-                viz_every_val = max(0, int(viz_every_var.get()))
-            except ValueError:
-                viz_every_val = 10
-
             params = {
-                "encoding":            enc_internal,
-                "bits_per_var":        int(bits_var.get()),
-                "pop_size":            int(pop_var.get()),
-                "generations":         int(gen_var.get()),
-                "crossover_type":      cx_internal,
-                "crossover_rate":      float(cxr_var.get()),
-                "mutation_rate":       float(mut_var.get()),
-                "tournament_k":        int(tk_var.get()),
-                "elitism":             int(eli_var.get()),
-                "seed":                int(seed_var.get()),
-                "stop_eps_f":          float(epsf_var.get()),
-                "stop_eps_dx":         float(epsdx_var.get()),
-                "no_improve_patience": int(pat_var.get()),
-                "viz_every":           viz_every_val if show_viz_var.get() else 0,
+                "encoding":       enc_internal,
+                "pop_size":       int(pop_var.get()),
+                "generations":    int(gen_var.get()),
+                "crossover_type": cx_internal,
+                "crossover_rate": float(cxr_var.get()),
+                "mutation_rate":  float(mut_var.get()),
+                "tournament_k":   int(tk_var.get()),
+                "elitism":        int(eli_var.get()),
+                "viz_every":      10,
             }
         except ValueError as exc:
             q.put(("error", f"Ошибка в параметрах: {exc}"))
@@ -849,9 +748,8 @@ def main():
                 if msg[0] == "progress":
                     _, gen, gens, best_f, pct, positions_xy, best_xy = msg
                     pb_var.set(pct)
-                    pb_lbl.set(
-                        f"Поколение {gen}/{gens},  best_f = {best_f:.4f}")
-                    if positions_xy is not None and show_viz_var.get():
+                    pb_lbl.set(f"Поколение {gen}/{gens},  f = {best_f:.4f}")
+                    if positions_xy is not None:
                         _redraw_viz(gen, gens, best_f, positions_xy, best_xy)
                 elif msg[0] == "done":
                     result, trace_df = msg[1], msg[2]
@@ -862,7 +760,6 @@ def main():
                     with open(os.path.join("out", "ga_last_result.json"),
                               "w", encoding="utf-8") as fh:
                         json.dump(result, fh, ensure_ascii=False, indent=2)
-                    # Сохранить трассу с русскими заголовками
                     trace_ru = trace_df.rename(columns=_TRACE_RU_COLUMNS)
                     trace_ru.to_csv(
                         os.path.join("out", "ga_last_trace.csv"), index=False,
