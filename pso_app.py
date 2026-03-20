@@ -229,14 +229,9 @@ def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
                 + c2 * r2 * (gbest_pos - positions)
             )
 
-        # Ограничить скорость (если задан vmax)
+        # Ограничить скорость (если задан vmax): покомпонентный клиппинг
         if vmax is not None:
-            speed = np.linalg.norm(velocities, axis=1, keepdims=True)
-            too_fast = speed > vmax
-            velocities[too_fast[:, 0]] = (
-                velocities[too_fast[:, 0]] /
-                speed[too_fast[:, 0]] * vmax
-            )
+            velocities = np.clip(velocities, -vmax, vmax)
 
         # Обновить позиции
         positions += velocities
@@ -299,7 +294,7 @@ _MODE_LABELS     = {
 _MODE_LABELS_INV = {v: k for k, v in _MODE_LABELS.items()}
 
 # Размер холста визуализации (пиксели)
-_VIZ_SIZE = 280
+_VIZ_SIZE = 420
 
 
 def _world_to_canvas(x: float, y: float, size: int = _VIZ_SIZE) -> tuple[int, int]:
@@ -319,67 +314,125 @@ def main():
     root.title("PSO — Eggholder")
     root.resizable(False, False)
 
-    # ---- Главный контейнер: левая колонка (параметры), правая (визуализация) ----
+    # =========================================================================
+    # Переменные параметров
+    # =========================================================================
+    mode_var      = tk.StringVar(value="Базовый PSO")
+    swarm_var     = tk.StringVar(value="30")
+    iters_var     = tk.StringVar(value="300")
+    show_viz_var  = tk.BooleanVar(value=True)
+    viz_every_var = tk.StringVar(value="10")
+    # Дополнительные параметры
+    w_var       = tk.StringVar(value="0.7")
+    c1_var      = tk.StringVar(value="1.5")
+    c2_var      = tk.StringVar(value="1.5")
+    vmax_var    = tk.StringVar(value="")
+    seed_var    = tk.StringVar(value="42")
+    epsdx_var   = tk.StringVar(value="0.0")
+    chi_lbl_var = tk.StringVar(value="")
+
+    # Кэш значений c1/c2/w для каждого режима (переключение не затирает ввод)
+    _mode_cache = {
+        "basic":        {"w": "0.7",  "c1": "1.5",  "c2": "1.5"},
+        "constriction": {"c1": "2.05", "c2": "2.05"},
+    }
+    _current_mode = ["basic"]  # изменяемый контейнер для отслеживания режима
+
+    # =========================================================================
+    # Пресеты
+    # =========================================================================
+    _PSO_PRESETS = {
+        "— выбрать пресет —": None,
+        "Базовый стандартный (w=0.7)": {
+            "mode_lbl": "Базовый PSO",
+            "swarm": "30", "iters": "300",
+            "w": "0.7", "c1": "1.5", "c2": "1.5", "vmax": "",
+        },
+        "Базовый быстрый (w=0.4)": {
+            "mode_lbl": "Базовый PSO",
+            "swarm": "20", "iters": "150",
+            "w": "0.4", "c1": "1.5", "c2": "1.5", "vmax": "",
+        },
+        "Базовый точный (w=0.729)": {
+            "mode_lbl": "Базовый PSO",
+            "swarm": "50", "iters": "500",
+            "w": "0.729", "c1": "1.494", "c2": "1.494", "vmax": "",
+        },
+        "Сжатие Клерка–Кеннеди (χ)": {
+            "mode_lbl": "PSO с коэф. сжатия (χ)",
+            "swarm": "30", "iters": "300",
+            "c1": "2.05", "c2": "2.05", "vmax": "",
+        },
+    }
+    preset_var = tk.StringVar(value="— выбрать пресет —")
+
+    # =========================================================================
+    # Основной контейнер
+    # =========================================================================
     main_frame = ttk.Frame(root)
     main_frame.grid(row=0, column=0, sticky="nsew")
 
-    # ---- Параметры (левая колонка) ----
-    pf = ttk.LabelFrame(main_frame, text="Параметры", padding=8)
-    pf.grid(row=0, column=0, padx=10, pady=8, sticky="nsew")
+    # =========================================================================
+    # Левая колонка — вкладки параметров (ttk.Notebook)
+    # =========================================================================
+    nb = ttk.Notebook(main_frame)
+    nb.grid(row=0, column=0, padx=10, pady=8, sticky="nsew")
 
-    def _row(parent, row, label, default, choices=None):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
-                                           padx=4, pady=2)
-        var = tk.StringVar(value=str(default))
+    def _field(parent, row, label, var, choices=None, width=22):
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=4, pady=3)
         if choices:
-            w = ttk.Combobox(parent, textvariable=var, values=choices,
-                             state="readonly", width=28)
+            wgt = ttk.Combobox(parent, textvariable=var, values=choices,
+                               state="readonly", width=width)
         else:
-            w = ttk.Entry(parent, textvariable=var, width=30)
-        w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
-        return var, w
+            wgt = ttk.Entry(parent, textvariable=var, width=width + 2)
+        wgt.grid(row=row, column=1, sticky="w", padx=4, pady=3)
+        return wgt
 
-    mode_var,  mode_cb = _row(pf, 0,
-        "Режим PSO:",
-        "Базовый PSO",
-        list(_MODE_LABELS.keys()))
-    swarm_var, _       = _row(pf, 1,
-        "Размер роя (частиц):",
-        "30")
-    iters_var, _       = _row(pf, 2,
-        "Число итераций:",
-        "300")
-    seed_var,  _       = _row(pf, 3,
-        "Сид (seed случайных чисел):",
-        "42")
-    w_var,     w_entry = _row(pf, 4,
-        "Инерционный вес (w):",
-        "0.7")
-    c1_var,    _       = _row(pf, 5,
-        "Когнитивный коэффициент (c1):",
-        "1.5")
-    c2_var,    _       = _row(pf, 6,
-        "Социальный коэффициент (c2):",
-        "1.5")
-    vmax_var,  _       = _row(pf, 7,
-        "Макс. скорость (vmax, пусто = нет):",
-        "")
-    epsdx_var, _       = _row(pf, 8,
-        "Останов по близости к минимуму\n(ε_dx, 0 = выключено):",
-        "0.0")
+    # ----- Вкладка «Основные» -----
+    tab_main = ttk.Frame(nb, padding=8)
+    nb.add(tab_main, text="  Основные  ")
 
-    # Метка для вычисляемого χ
-    chi_lbl_var = tk.StringVar(value="")
-    chi_lbl = ttk.Label(pf, textvariable=chi_lbl_var, foreground="#225599",
-                         font=("", 9, "italic"))
-    chi_lbl.grid(row=9, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+    _field(tab_main, 0, "Режим PSO:", mode_var, list(_MODE_LABELS.keys()))
+    _field(tab_main, 1, "Быстрый пресет:", preset_var,
+           list(_PSO_PRESETS.keys()), width=30)
+    ttk.Separator(tab_main, orient="horizontal").grid(
+        row=2, column=0, columnspan=2, sticky="ew", pady=5)
+    _field(tab_main, 3, "Размер роя (частиц):", swarm_var)
+    _field(tab_main, 4, "Число итераций:", iters_var)
+    ttk.Separator(tab_main, orient="horizontal").grid(
+        row=5, column=0, columnspan=2, sticky="ew", pady=5)
+    ttk.Label(tab_main, text="Визуализация:", font=("", 9, "bold")).grid(
+        row=6, column=0, sticky="w", padx=4, pady=(4, 2))
+    ttk.Checkbutton(tab_main, text="Показывать визуализацию",
+                    variable=show_viz_var).grid(
+        row=7, column=0, columnspan=2, sticky="w", padx=8)
+    ttk.Label(tab_main, text="Обновление каждые N итераций:").grid(
+        row=8, column=0, sticky="w", padx=4, pady=2)
+    ttk.Entry(tab_main, textvariable=viz_every_var, width=8).grid(
+        row=8, column=1, sticky="w", padx=4)
 
+    # ----- Вкладка «Дополнительно» -----
+    tab_adv = ttk.Frame(nb, padding=8)
+    nb.add(tab_adv, text="  Дополнительно  ")
+
+    w_entry = _field(tab_adv, 0, "Инерционный вес (w):", w_var)
+    _field(tab_adv, 1, "Когнитивный коэф. (c1):", c1_var)
+    _field(tab_adv, 2, "Социальный коэф. (c2):", c2_var)
+    _field(tab_adv, 3, "Макс. скорость каждой компоненты\n(vmax, покомпонентно; пусто = нет):", vmax_var)
+    _field(tab_adv, 4, "Сид (seed):", seed_var)
+    _field(tab_adv, 5, "Останов ε_dx (0 = выкл.):", epsdx_var)
+    ttk.Label(tab_adv, textvariable=chi_lbl_var, foreground="#225599",
+              font=("", 9, "italic")).grid(
+        row=6, column=0, columnspan=2, sticky="w", padx=4, pady=2)
+
+    # =========================================================================
+    # Колбэки для режима, chi-метки и пресетов
+    # =========================================================================
     def _update_chi_label(*_):
         if _MODE_LABELS.get(mode_var.get()) == "constriction":
             try:
-                c1_v = float(c1_var.get())
-                c2_v = float(c2_var.get())
-                chi_val = _clerc_chi(c1_v, c2_v)
+                chi_val = _clerc_chi(float(c1_var.get()), float(c2_var.get()))
                 chi_lbl_var.set(f"  → χ = {chi_val:.6f}")
             except Exception:
                 chi_lbl_var.set("  → χ: нет (c1+c2 должно быть > 4)")
@@ -387,71 +440,170 @@ def main():
             chi_lbl_var.set("")
 
     def _on_mode(*_):
-        if _MODE_LABELS.get(mode_var.get()) == "constriction":
+        new_mode = _MODE_LABELS.get(mode_var.get(), "basic")
+        old_mode = _current_mode[0]
+        if new_mode == old_mode:
+            return
+        # Сохранить текущие значения в кэш старого режима
+        _mode_cache[old_mode]["c1"] = c1_var.get()
+        _mode_cache[old_mode]["c2"] = c2_var.get()
+        if old_mode == "basic":
+            _mode_cache[old_mode]["w"] = w_var.get()
+        # Загрузить значения нового режима
+        _current_mode[0] = new_mode
+        cached = _mode_cache[new_mode]
+        c1_var.set(cached["c1"])
+        c2_var.set(cached["c2"])
+        if new_mode == "constriction":
             w_entry.config(state="disabled")
-            c1_var.set("2.05")
-            c2_var.set("2.05")
         else:
             w_entry.config(state="normal")
-            c1_var.set("1.5")
-            c2_var.set("1.5")
+            w_var.set(cached.get("w", "0.7"))
         _update_chi_label()
+
+    def _apply_preset(*_):
+        name = preset_var.get()
+        if name == "— выбрать пресет —":
+            return
+        p = _PSO_PRESETS.get(name)
+        if p is None:
+            return
+        # Обновить кэш целевого режима ДО смены режима
+        new_mode = _MODE_LABELS.get(p["mode_lbl"], "basic")
+        _mode_cache[new_mode]["c1"] = p["c1"]
+        _mode_cache[new_mode]["c2"] = p["c2"]
+        if "w" in p:
+            _mode_cache[new_mode]["w"] = p["w"]
+        # Установить режим (вызовет _on_mode → загрузит из кэша)
+        mode_var.set(p["mode_lbl"])
+        swarm_var.set(p["swarm"])
+        iters_var.set(p["iters"])
+        vmax_var.set(p.get("vmax", ""))
+        # Сбросить выбор пресета (повторный вызов вернётся на первой строке)
+        preset_var.set("— выбрать пресет —")
 
     mode_var.trace_add("write", _on_mode)
     c1_var.trace_add("write", _update_chi_label)
     c2_var.trace_add("write", _update_chi_label)
+    preset_var.trace_add("write", _apply_preset)
 
-    # ---- Настройки визуализации ----
-    vf_ctrl = ttk.LabelFrame(pf, text="Визуализация", padding=4)
-    vf_ctrl.grid(row=10, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
-
-    show_viz_var = tk.BooleanVar(value=True)
-    ttk.Checkbutton(vf_ctrl, text="Показывать визуализацию",
-                    variable=show_viz_var).grid(row=0, column=0, sticky="w")
-    ttk.Label(vf_ctrl, text="Обновление каждые N итераций:").grid(
-        row=1, column=0, sticky="w", padx=4)
-    viz_every_var = tk.StringVar(value="10")
-    ttk.Entry(vf_ctrl, textvariable=viz_every_var, width=8).grid(
-        row=1, column=1, sticky="w", padx=4)
-
-    # ---- Правая колонка: визуализация роя ----
+    # =========================================================================
+    # Правая колонка — визуализация роя
+    # =========================================================================
     vf = ttk.LabelFrame(main_frame, text="Визуализация роя", padding=4)
-    vf.grid(row=0, column=1, padx=10, pady=8, sticky="nsew")
+    vf.grid(row=0, column=1, padx=10, pady=8, sticky="n")
 
     viz_canvas = tk.Canvas(vf, width=_VIZ_SIZE, height=_VIZ_SIZE,
-                           bg="#f5f5e8", highlightthickness=1,
-                           highlightbackground="#888888")
-    viz_canvas.pack()
+                           bg="#1a1a2e", highlightthickness=1,
+                           highlightbackground="#555555")
+    viz_canvas.grid(row=0, column=0, sticky="nsew")
 
-    # Отметить истинный минимум звёздочкой (рисуется один раз)
+    # Истинный минимум (рисуется один раз, поднимается поверх всего)
     _TRUE_CX, _TRUE_CY = _world_to_canvas(TRUE_MIN[0], TRUE_MIN[1])
     viz_canvas.create_text(_TRUE_CX, _TRUE_CY, text="★",
-                            fill="red", font=("", 13), tags="true_min")
-    viz_canvas.create_text(_VIZ_SIZE // 2, _VIZ_SIZE - 10,
-                            text=f"Истинный минимум: ({TRUE_MIN[0]:.0f}, {TRUE_MIN[1]:.1f})",
-                            fill="red", font=("", 8))
+                            fill="#ff4444", font=("", 14, "bold"), tags="true_min")
 
-    def _redraw_viz(positions_xy: np.ndarray, gbest_xy: np.ndarray):
-        """Перерисовать холст с текущим роем."""
+    # Легенда
+    leg_canvas = tk.Canvas(vf, width=_VIZ_SIZE, height=52,
+                           bg="#f0f0f0", highlightthickness=0)
+    leg_canvas.grid(row=1, column=0, sticky="ew", padx=0, pady=(4, 0))
+    leg_canvas.create_text(8, 10, text="Легенда:", anchor="w",
+                           font=("", 8, "bold"), fill="#333333")
+    _leg_items = [
+        (14, 28, "#4488cc", "oval", "Частицы роя"),
+        (14, 44, "#00aa44", "oval", "След лучшей точки"),
+        (_VIZ_SIZE // 2 + 14, 28, "#ff8800", "oval", "Глобальный лидер"),
+        (_VIZ_SIZE // 2 + 14, 44, "#ff4444", "star", "Истинный минимум"),
+    ]
+    for lx, ly, lc, ltype, ltxt in _leg_items:
+        if ltype == "star":
+            leg_canvas.create_text(lx, ly, text="★", fill=lc,
+                                   font=("", 10, "bold"), anchor="w")
+        else:
+            leg_canvas.create_oval(lx - 4, ly - 4, lx + 4, ly + 4,
+                                   fill=lc, outline="")
+        leg_canvas.create_text(lx + 14, ly, text=ltxt,
+                               fill="#333333", font=("", 8), anchor="w")
+
+    # Пояснительный текст
+    ttk.Label(vf,
+              text="Синие — рой, оранжевая — лучшая позиция, зелёные — след,\n"
+                   "красная ★ — истинный глобальный минимум.",
+              font=("", 8), foreground="#777777",
+              wraplength=_VIZ_SIZE).grid(row=2, column=0, sticky="w",
+                                         padx=4, pady=(2, 0))
+
+    # Живая статистика
+    info_var = tk.StringVar(value="")
+    ttk.Label(vf, textvariable=info_var, font=("Courier", 9),
+              foreground="#225599").grid(row=3, column=0, sticky="w",
+                                         padx=4, pady=(4, 2))
+
+    # Буфер следа лучшей позиции (последние N точек)
+    _best_trail: list = []
+    _TRAIL_LEN = 30
+
+    def _redraw_viz(it: int, total: int, gbest_val: float,
+                    positions_xy: np.ndarray, gbest_xy: np.ndarray):
+        """Перерисовать холст с текущим роем, следом и статистикой."""
         viz_canvas.delete("swarm")
-        r = 3
-        for xi, yi in positions_xy:
-            cx, cy = _world_to_canvas(xi, yi)
-            viz_canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
-                                   fill="#4488cc", outline="", tags="swarm")
+
+        # Обновить буфер следа
+        if gbest_xy is not None:
+            tx, ty = _world_to_canvas(gbest_xy[0], gbest_xy[1])
+            _best_trail.append((tx, ty))
+            if len(_best_trail) > _TRAIL_LEN:
+                del _best_trail[:-_TRAIL_LEN]
+
+        # Нарисовать след (постепенно ярче к последней точке)
+        n = len(_best_trail)
+        for i, (tx, ty) in enumerate(_best_trail):
+            frac = (i + 1) / max(n, 1)
+            g = int(60 + frac * 155)
+            trail_color = f"#00{g:02x}44"
+            r_t = max(1, round(frac * 3))
+            viz_canvas.create_oval(tx - r_t, ty - r_t, tx + r_t, ty + r_t,
+                                   fill=trail_color, outline="", tags="swarm")
+
+        # Частицы роя
+        if positions_xy is not None:
+            for xi, yi in positions_xy:
+                cx, cy = _world_to_canvas(xi, yi)
+                viz_canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
+                                       fill="#4488cc", outline="", tags="swarm")
+
         # Глобальный лидер
         if gbest_xy is not None:
             bx_c, by_c = _world_to_canvas(gbest_xy[0], gbest_xy[1])
-            viz_canvas.create_oval(bx_c - 5, by_c - 5, bx_c + 5, by_c + 5,
-                                   fill="orange", outline="black", width=1,
+            viz_canvas.create_oval(bx_c - 6, by_c - 6, bx_c + 6, by_c + 6,
+                                   fill="#ff8800", outline="#ffffff", width=1,
                                    tags="swarm")
+
         viz_canvas.tag_raise("true_min")
 
-    # ---- Управление ----
+        # Обновить живую статистику
+        if gbest_xy is not None:
+            dx_live = _euclidean(gbest_xy[0], gbest_xy[1],
+                                 TRUE_MIN[0], TRUE_MIN[1])
+            info_var.set(
+                f"Итерация: {it + 1} / {total}    best f = {gbest_val:.4f}\n"
+                f"Лучший (x, y) = ({gbest_xy[0]:.2f}, {gbest_xy[1]:.2f})\n"
+                f"dx до минимума = {dx_live:.4f}"
+            )
+
+    def _clear_viz():
+        """Очистить холст и буфер следа перед новым запуском."""
+        _best_trail.clear()
+        viz_canvas.delete("swarm")
+        info_var.set("")
+
+    # =========================================================================
+    # Управление
+    # =========================================================================
     cf = ttk.Frame(root, padding=8)
     cf.grid(row=1, column=0, sticky="ew")
 
-    run_btn = ttk.Button(cf, text="Запустить")
+    run_btn = ttk.Button(cf, text="▶  Запустить")
     run_btn.grid(row=0, column=0, padx=4, pady=4)
 
     def _open_out():
@@ -472,14 +624,16 @@ def main():
 
     pb_var = tk.IntVar(value=0)
     ttk.Progressbar(cf, variable=pb_var, maximum=100,
-                    length=400, mode="determinate").grid(
+                    length=450, mode="determinate").grid(
         row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
 
     pb_lbl = tk.StringVar(value="")
     ttk.Label(cf, textvariable=pb_lbl).grid(row=3, column=0, columnspan=2,
                                              sticky="w", padx=4)
 
-    # ---- Результаты ----
+    # =========================================================================
+    # Результаты
+    # =========================================================================
     rf = ttk.LabelFrame(root, text="Результаты", padding=8)
     rf.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
 
@@ -513,24 +667,26 @@ def main():
         "gbest_y": "лучший_y",
     }
 
+    # =========================================================================
+    # Рабочий поток
+    # =========================================================================
     def _worker():
         try:
             mode_internal = _MODE_LABELS.get(mode_var.get(), "basic")
-
             try:
                 viz_every_val = max(0, int(viz_every_var.get()))
             except ValueError:
                 viz_every_val = 10
 
             params: dict = {
-                "mode":         mode_internal,
-                "swarm_size":   int(swarm_var.get()),
-                "iters":        int(iters_var.get()),
-                "seed":         int(seed_var.get()),
-                "c1":           float(c1_var.get()),
-                "c2":           float(c2_var.get()),
-                "stop_eps_dx":  float(epsdx_var.get()),
-                "viz_every":    viz_every_val if show_viz_var.get() else 0,
+                "mode":        mode_internal,
+                "swarm_size":  int(swarm_var.get()),
+                "iters":       int(iters_var.get()),
+                "seed":        int(seed_var.get()),
+                "c1":          float(c1_var.get()),
+                "c2":          float(c2_var.get()),
+                "stop_eps_dx": float(epsdx_var.get()),
+                "viz_every":   viz_every_val if show_viz_var.get() else 0,
             }
             if mode_internal == "basic":
                 params["w"] = float(w_var.get())
@@ -556,7 +712,7 @@ def main():
         pb_var.set(0)
         pb_lbl.set("")
         status_var.set("Выполняется…")
-        viz_canvas.delete("swarm")
+        _clear_viz()
         threading.Thread(target=_worker, daemon=True).start()
         root.after(50, _poll)
 
@@ -570,7 +726,7 @@ def main():
                     pb_lbl.set(
                         f"Итерация {it}/{total},  best_f = {gbest_val:.4f}")
                     if positions_xy is not None and show_viz_var.get():
-                        _redraw_viz(positions_xy, gbest_xy)
+                        _redraw_viz(it, total, gbest_val, positions_xy, gbest_xy)
                 elif msg[0] == "done":
                     result, trace_df = msg[1], msg[2]
                     status_var.set("Готово")
