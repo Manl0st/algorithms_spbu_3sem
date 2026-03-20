@@ -7,6 +7,15 @@ objective.py
 что делает её хорошим тестовым случаем для алгоритмов глобальной оптимизации.
 
 Ссылка: https://www.sfu.ca/~ssurjano/egg.html
+
+Как пользоваться
+----------------
+Этот модуль не запускается напрямую. Он импортируется из ga_app.py, pso_app.py,
+run_experiments.py и make_plots.py.
+
+    from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective, eggholder
+
+Глобальный минимум: f(512, 404.2319) ≈ −959.6407
 """
 
 import math
