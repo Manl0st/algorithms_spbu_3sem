@@ -32,8 +32,9 @@ import time
 
 import numpy as np
 import pandas as pd
-import tkinter as tk
-from tkinter import ttk, messagebox
+import sys
+from PyQt6 import QtWidgets, QtCore, QtGui
+import pyqtgraph as pg
 
 from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective
 
