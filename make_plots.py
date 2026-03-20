@@ -15,14 +15,15 @@ make_plots.py
   4. success_rate.png      — столбчатая диаграмма success_rate
   5. scatter_endpoints.png — scatter финальных точек (best_x, best_y) по вариантам
 
-Запуск::
+Запуск (открывает GUI-окно)::
 
     python make_plots.py
 """
 
 import json
 import os
-import sys
+import queue as _queue
+import threading
 
 import matplotlib
 matplotlib.use("Agg")          # безголовый бэкенд (без GUI)
@@ -30,6 +31,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 
 from objective import TRUE_MIN, TRUE_F
 
@@ -286,49 +289,148 @@ def plot_scatter_endpoints(results: pd.DataFrame, colors: dict) -> None:
 
 
 # ===========================================================================
-# Точка входа
+# GUI
 # ===========================================================================
 
 def main():
-    """Загрузить данные и построить все графики."""
+    """Точка входа при запуске `python make_plots.py` — открывает GUI-окно."""
+    q: _queue.Queue = _queue.Queue()
 
-    print("=== Построение графиков ===")
+    root = tk.Tk()
+    root.title("Построение графиков")
+    root.resizable(False, False)
 
-    # -- Определить порог успеха: сначала из метаданных, затем спросить пользователя
-    threshold = _load_threshold()
-    raw = input(f"Порог успеха dx [{threshold}] (Enter = оставить): ").strip()
-    if raw:
+    # ---- Файлы ввода ----
+    ff = ttk.LabelFrame(root, text="Файлы данных", padding=8)
+    ff.grid(row=0, column=0, padx=10, pady=8, sticky="ew")
+
+    def _file_row(parent, row, label, default):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
+                                           padx=4, pady=2)
+        var = tk.StringVar(value=default)
+        ttk.Entry(parent, textvariable=var, width=38).grid(row=row, column=1,
+                                                            sticky="w", padx=4)
+        def _browse():
+            path = filedialog.askopenfilename(
+                title=f"Выбрать {label}",
+                filetypes=[("CSV файлы", "*.csv"), ("Все файлы", "*.*")],
+                initialfile=default,
+            )
+            if path:
+                var.set(path)
+        ttk.Button(parent, text="…", width=3,
+                   command=_browse).grid(row=row, column=2, padx=2)
+        return var
+
+    results_var = _file_row(ff, 0, "results.csv:", RESULTS_CSV)
+    traces_var  = _file_row(ff, 1, "traces.csv:",  TRACES_CSV)
+
+    # ---- Настройки ----
+    sf = ttk.LabelFrame(root, text="Настройки", padding=8)
+    sf.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+
+    ttk.Label(sf, text="Порог успеха dx:").grid(row=0, column=0, sticky="w",
+                                                 padx=4, pady=2)
+    dx_var = tk.StringVar(value=str(_load_threshold()))
+    ttk.Entry(sf, textvariable=dx_var, width=12).grid(row=0, column=1,
+                                                       sticky="w", padx=4)
+
+    # ---- Управление ----
+    cf = ttk.Frame(root, padding=8)
+    cf.grid(row=2, column=0, sticky="ew")
+
+    build_btn = ttk.Button(cf, text="Построить графики")
+    build_btn.grid(row=0, column=0, padx=4, pady=4)
+
+    status_var = tk.StringVar(value="Готово")
+    ttk.Label(cf, textvariable=status_var,
+              font=("", 10, "bold")).grid(row=1, column=0, sticky="w", padx=4)
+
+    # ---- Список файлов ----
+    lf = ttk.LabelFrame(root, text="Созданные файлы", padding=8)
+    lf.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
+
+    files_txt = tk.Text(lf, height=6, width=56, state="disabled",
+                        font=("Courier", 9))
+    files_txt.grid(row=0, column=0, sticky="nsew")
+
+    def _show_files(paths: list[str]):
+        files_txt.config(state="normal")
+        files_txt.delete("1.0", "end")
+        for p in paths:
+            files_txt.insert("end", p + "\n")
+        files_txt.config(state="disabled")
+
+    def _worker():
         try:
-            threshold = float(raw)
-        except ValueError:
-            print(f"Некорректное значение '{raw}'; используется {threshold}.")
-    print(f"Порог успеха dx = {threshold}\n")
+            threshold = float(dx_var.get())
+        except ValueError as exc:
+            q.put(("error", f"Ошибка в параметрах: {exc}"))
+            return
 
-    results, traces = _load_data()
-    os.makedirs(PLOTS_DIR, exist_ok=True)
+        results_path = results_var.get()
+        traces_path  = traces_var.get()
 
-    # Собрать список уникальных вариантов в порядке появления
-    variants = list(results["variant"].unique())
-    colors   = _color_map(variants)
+        if not os.path.exists(results_path):
+            q.put(("error",
+                   f"Файл '{results_path}' не найден.\n"
+                   "Сначала запустите run_experiments.py"))
+            return
 
-    print(f"Найдено {len(results)} запусков, {len(variants)} вариантов:")
-    for v in variants:
-        n = (results["variant"] == v).sum()
-        print(f"  {v}: {n} запусков")
-    print()
+        try:
+            results = pd.read_csv(results_path)
+            traces  = (pd.read_csv(traces_path)
+                       if os.path.exists(traces_path) else pd.DataFrame())
 
-    if not traces.empty:
-        plot_convergence(traces, colors)
-    else:
-        print("Пропуск графика сходимости: нет данных трасс.")
+            os.makedirs(PLOTS_DIR, exist_ok=True)
+            variants = list(results["variant"].unique())
+            colors   = _color_map(variants)
 
-    plot_boxplot_best_f(results, colors)
-    plot_boxplot_dx(results, colors, threshold)
-    plot_success_rate(results, colors, threshold)
-    plot_scatter_endpoints(results, colors)
+            if not traces.empty:
+                plot_convergence(traces, colors)
+            plot_boxplot_best_f(results, colors)
+            plot_boxplot_dx(results, colors, threshold)
+            plot_success_rate(results, colors, threshold)
+            plot_scatter_endpoints(results, colors)
 
-    print("\nВсе графики сохранены в:", PLOTS_DIR)
+            saved = sorted(
+                os.path.join(PLOTS_DIR, f)
+                for f in os.listdir(PLOTS_DIR)
+                if f.endswith(".png")
+            )
+            q.put(("done", saved))
+        except Exception as exc:
+            q.put(("error", str(exc)))
+
+    def _start():
+        build_btn.config(state="disabled")
+        status_var.set("Выполняется…")
+        _show_files([])
+        threading.Thread(target=_worker, daemon=True).start()
+        root.after(100, _poll)
+
+    def _poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                if msg[0] == "done":
+                    status_var.set("Готово")
+                    _show_files(msg[1])
+                    build_btn.config(state="normal")
+                    return
+                elif msg[0] == "error":
+                    status_var.set("Ошибка")
+                    messagebox.showerror("Ошибка", msg[1])
+                    build_btn.config(state="normal")
+                    return
+        except _queue.Empty:
+            pass
+        root.after(100, _poll)
+
+    build_btn.config(command=_start)
+    root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+

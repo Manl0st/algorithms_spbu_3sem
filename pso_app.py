@@ -7,7 +7,7 @@ pso_app.py
   - basic        : классический PSO с инерционным весом w
   - constriction : PSO с коэффициентом сжатия χ (Clerc & Kennedy, 2002)
 
-Запуск в интерактивном режиме::
+Запуск (открывает GUI-окно)::
 
     python pso_app.py
 
@@ -19,24 +19,21 @@ pso_app.py
 import json
 import math
 import os
+import queue as _queue
+import subprocess
+import threading
 import time
 
 import numpy as np
 import pandas as pd
+import tkinter as tk
+from tkinter import ttk, messagebox
 
 from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective
 
 # ---------------------------------------------------------------------------
 # Вспомогательные утилиты
 # ---------------------------------------------------------------------------
-
-def _ask(prompt: str, default):
-    """Запросить ввод с подсказкой; пустой ввод → default."""
-    raw = input(f"{prompt} [{default}]: ").strip()
-    if raw == "":
-        return default
-    return type(default)(raw)
-
 
 def _euclidean(x1: float, y1: float, x2: float, y2: float) -> float:
     """Евклидово расстояние между точками (x1,y1) и (x2,y2)."""
@@ -79,7 +76,7 @@ def _clerc_chi(c1: float, c2: float) -> float:
 # Основной алгоритм PSO
 # ===========================================================================
 
-def run_pso(params: dict) -> tuple[dict, pd.DataFrame]:
+def run_pso(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     """
     Запустить PSO с заданными параметрами.
 
@@ -93,6 +90,9 @@ def run_pso(params: dict) -> tuple[dict, pd.DataFrame]:
     c1          : float — когнитивный коэффициент (default 1.5 / 2.05)
     c2          : float — социальный коэффициент  (default 1.5 / 2.05)
     vmax        : float — максимальная скорость по модулю (None → без ограничений)
+    callback : callable, optional
+        Вызывается на каждой итерации: callback(it, total_iters, gbest_val).
+        Используется GUI для отображения прогресса.
 
     Возвращает
     ----------
@@ -175,6 +175,9 @@ def run_pso(params: dict) -> tuple[dict, pd.DataFrame]:
             "gbest_x":   gbest_pos[0],
             "gbest_y":   gbest_pos[1],
         })
+
+        if callback is not None:
+            callback(it, iters, gbest_val)
 
         # Досрочный останов по близости к истинному минимуму (если включён)
         if stop_eps_dx > 0.0 and best_dx < stop_eps_dx:
@@ -263,78 +266,188 @@ def run_pso(params: dict) -> tuple[dict, pd.DataFrame]:
 
 
 # ===========================================================================
-# Интерактивный запуск
+# GUI
 # ===========================================================================
 
-def _interactive_params() -> dict:
-    """Запросить параметры PSO у пользователя через input() с дефолтами."""
-
-    print("\n=== PSO — Eggholder ===")
-    print("Нажмите Enter для принятия значения по умолчанию.\n")
-
-    mode = _ask("Режим PSO (basic / constriction)", "basic")
-    if mode not in ("basic", "constriction"):
-        print(f"Неизвестный режим '{mode}', используется 'basic'.")
-        mode = "basic"
-
-    swarm_size = int(_ask("Размер роя (swarm_size)", 30))
-    iters      = int(_ask("Число итераций (iters)", 300))
-    seed       = int(_ask("Начальный seed", 42))
-
-    if mode == "basic":
-        w  = float(_ask("Инерционный вес w", 0.7))
-        c1 = float(_ask("Когнитивный коэффициент c1", 1.5))
-        c2 = float(_ask("Социальный коэффициент c2", 1.5))
-        params = {"mode": mode, "swarm_size": swarm_size, "iters": iters,
-                  "seed": seed, "w": w, "c1": c1, "c2": c2}
-    else:
-        c1 = float(_ask("Когнитивный коэффициент c1 (нужен c1+c2 > 4)", 2.05))
-        c2 = float(_ask("Социальный коэффициент c2", 2.05))
-        params = {"mode": mode, "swarm_size": swarm_size, "iters": iters,
-                  "seed": seed, "c1": c1, "c2": c2}
-
-    vmax_str = input(f"Макс. скорость vmax (Enter = без ограничений): ").strip()
-    if vmax_str:
-        params["vmax"] = float(vmax_str)
-
-    # Досрочный останов по близости к глобальному минимуму (0 = отключён)
-    eps_dx_str = _ask("Порог досрочного останова stop_eps_dx (0 = отключён)", 0.0)
-    if float(eps_dx_str) > 0.0:
-        params["stop_eps_dx"] = float(eps_dx_str)
-
-    return params
-
-
 def main():
-    """Точка входа при запуске `python pso_app.py`."""
+    """Точка входа при запуске `python pso_app.py` — открывает GUI-окно."""
+    q: _queue.Queue = _queue.Queue()
 
-    params = _interactive_params()
-    result, trace_df = run_pso(params)
+    root = tk.Tk()
+    root.title("PSO — Eggholder")
+    root.resizable(False, False)
 
-    # -- вывод результатов ---------------------------------------------------
-    print("\n--- Результаты PSO ---")
-    print(f"  Лучшая точка  : x = {result['gbest_x']:.6f}, y = {result['gbest_y']:.6f}")
-    print(f"  f(x*, y*)     : {result['best_f']:.6f}")
-    print(f"  dx до истины  : {result['dx']:.6f}")
-    print(f"  df = f - f*   : {result['df']:.6f}")
-    print(f"  Вычислений f  : {result['evals']}")
-    print(f"  Итераций      : {result['iters']}")
-    if result["mode"] == "constriction":
-        print(f"  Коэффициент χ : {result['chi']:.6f}")
-    print(f"  Время         : {result['time_sec']:.3f} с")
+    # ---- Параметры ----
+    pf = ttk.LabelFrame(root, text="Параметры", padding=8)
+    pf.grid(row=0, column=0, padx=10, pady=8, sticky="nsew")
 
-    # -- сохранение результатов ----------------------------------------------
-    os.makedirs("out", exist_ok=True)
+    def _row(parent, row, label, default, choices=None):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
+                                           padx=4, pady=2)
+        var = tk.StringVar(value=str(default))
+        if choices:
+            w = ttk.Combobox(parent, textvariable=var, values=choices,
+                             state="readonly", width=22)
+        else:
+            w = ttk.Entry(parent, textvariable=var, width=24)
+        w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+        return var, w
 
-    json_path = os.path.join("out", "pso_last_result.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nРезультат сохранён: {json_path}")
+    mode_var,  _       = _row(pf, 0, "Режим PSO:",                    "basic",
+                              ["basic", "constriction"])
+    swarm_var, _       = _row(pf, 1, "Размер роя:",                    "30")
+    iters_var, _       = _row(pf, 2, "Итераций:",                      "300")
+    seed_var,  _       = _row(pf, 3, "Seed:",                          "42")
+    w_var,     w_entry = _row(pf, 4, "Инерционный вес w:",             "0.7")
+    c1_var,    _       = _row(pf, 5, "Когнитивный коэф. c1:",          "1.5")
+    c2_var,    _       = _row(pf, 6, "Социальный коэф. c2:",           "1.5")
+    vmax_var,  _       = _row(pf, 7, "vmax (пусто = без огранич.):",   "")
+    epsdx_var, _       = _row(pf, 8, "stop_eps_dx (0=откл.):",         "0.0")
 
-    csv_path = os.path.join("out", "pso_last_trace.csv")
-    trace_df.to_csv(csv_path, index=False)
-    print(f"Трасса сохранена : {csv_path}")
+    def _on_mode(*_):
+        if mode_var.get() == "constriction":
+            w_entry.config(state="disabled")
+            c1_var.set("2.05")
+            c2_var.set("2.05")
+        else:
+            w_entry.config(state="normal")
+            c1_var.set("1.5")
+            c2_var.set("1.5")
+
+    mode_var.trace_add("write", _on_mode)
+
+    # ---- Управление ----
+    cf = ttk.Frame(root, padding=8)
+    cf.grid(row=1, column=0, sticky="ew")
+
+    run_btn = ttk.Button(cf, text="Запустить")
+    run_btn.grid(row=0, column=0, padx=4, pady=4)
+
+    def _open_out():
+        folder = os.path.abspath("out")
+        os.makedirs(folder, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(folder)
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
+    ttk.Button(cf, text="Открыть папку out",
+               command=_open_out).grid(row=0, column=1, padx=4)
+
+    status_var = tk.StringVar(value="Готово")
+    ttk.Label(cf, textvariable=status_var,
+              font=("", 10, "bold")).grid(row=1, column=0, columnspan=2,
+                                          sticky="w", padx=4)
+
+    pb_var = tk.IntVar(value=0)
+    ttk.Progressbar(cf, variable=pb_var, maximum=100,
+                    length=350, mode="determinate").grid(
+        row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
+
+    pb_lbl = tk.StringVar(value="")
+    ttk.Label(cf, textvariable=pb_lbl).grid(row=3, column=0, columnspan=2,
+                                             sticky="w", padx=4)
+
+    # ---- Результаты ----
+    rf = ttk.LabelFrame(root, text="Результаты", padding=8)
+    rf.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
+
+    res_txt = tk.Text(rf, height=8, width=54, state="disabled",
+                      font=("Courier", 9))
+    res_txt.grid(row=0, column=0, sticky="nsew")
+
+    def _show(r):
+        res_txt.config(state="normal")
+        res_txt.delete("1.0", "end")
+        res_txt.insert("end",
+                       f"Лучшая точка : x = {r['gbest_x']:.6f},  "
+                       f"y = {r['gbest_y']:.6f}\n")
+        res_txt.insert("end", f"f(x*, y*)     = {r['best_f']:.6f}\n")
+        res_txt.insert("end", f"dx до истины  = {r['dx']:.6f}\n")
+        res_txt.insert("end", f"df = f − f*   = {r['df']:.6f}\n")
+        res_txt.insert("end", f"Вычислений f  : {r['evals']}\n")
+        res_txt.insert("end", f"Итераций      : {r['iters']}\n")
+        if r["mode"] == "constriction":
+            res_txt.insert("end", f"Коэффициент χ : {r['chi']:.6f}\n")
+        res_txt.insert("end", f"Время         : {r['time_sec']:.3f} с\n")
+        res_txt.config(state="disabled")
+
+    def _worker():
+        try:
+            params: dict = {
+                "mode":       mode_var.get(),
+                "swarm_size": int(swarm_var.get()),
+                "iters":      int(iters_var.get()),
+                "seed":       int(seed_var.get()),
+                "c1":         float(c1_var.get()),
+                "c2":         float(c2_var.get()),
+                "stop_eps_dx": float(epsdx_var.get()),
+            }
+            if mode_var.get() == "basic":
+                params["w"] = float(w_var.get())
+            vmax_str = vmax_var.get().strip()
+            if vmax_str:
+                params["vmax"] = float(vmax_str)
+        except ValueError as exc:
+            q.put(("error", f"Ошибка в параметрах: {exc}"))
+            return
+
+        def cb(it, total, gbest_val):
+            pct = int(it / max(total, 1) * 100)
+            q.put(("progress", it, total, gbest_val, pct))
+
+        try:
+            result, trace_df = run_pso(params, callback=cb)
+            q.put(("done", result, trace_df))
+        except Exception as exc:
+            q.put(("error", str(exc)))
+
+    def _start():
+        run_btn.config(state="disabled")
+        pb_var.set(0)
+        pb_lbl.set("")
+        status_var.set("Выполняется…")
+        threading.Thread(target=_worker, daemon=True).start()
+        root.after(50, _poll)
+
+    def _poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                if msg[0] == "progress":
+                    _, it, total, gbest_val, pct = msg
+                    pb_var.set(pct)
+                    pb_lbl.set(
+                        f"Итерация {it}/{total},  best_f = {gbest_val:.4f}")
+                elif msg[0] == "done":
+                    result, trace_df = msg[1], msg[2]
+                    status_var.set("Готово")
+                    pb_var.set(100)
+                    _show(result)
+                    os.makedirs("out", exist_ok=True)
+                    with open(os.path.join("out", "pso_last_result.json"),
+                              "w", encoding="utf-8") as fh:
+                        json.dump(result, fh, ensure_ascii=False, indent=2)
+                    trace_df.to_csv(
+                        os.path.join("out", "pso_last_trace.csv"), index=False)
+                    pb_lbl.set(
+                        "Сохранено: out/pso_last_result.json, "
+                        "out/pso_last_trace.csv")
+                    run_btn.config(state="normal")
+                    return
+                elif msg[0] == "error":
+                    status_var.set("Ошибка")
+                    messagebox.showerror("Ошибка", msg[1])
+                    run_btn.config(state="normal")
+                    return
+        except _queue.Empty:
+            pass
+        root.after(50, _poll)
+
+    run_btn.config(command=_start)
+    root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+

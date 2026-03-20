@@ -6,12 +6,11 @@ run_experiments.py
 
 Как использовать
 ----------------
-1. Запустите::
+Запустите::
 
-       python run_experiments.py
+    python run_experiments.py
 
-   Программа покажет меню на русском языке; нажмите Enter для принятия
-   значений по умолчанию.
+Откроется GUI-окно для настройки и запуска экспериментов.
 
 Результаты будут сохранены в папке out/:
   - results.csv          — одна строка на один запуск
@@ -23,10 +22,15 @@ run_experiments.py
 import datetime
 import json
 import os
+import queue as _queue
+import subprocess
+import threading
 import time
 
 import numpy as np
 import pandas as pd
+import tkinter as tk
+from tkinter import ttk, messagebox
 
 # Импортируем алгоритмы из соседних файлов
 from ga_app  import run_ga
@@ -136,57 +140,6 @@ EXPERIMENTS: list[dict] = [
 ]
 
 # ===========================================================================
-# Вспомогательные функции
-# ===========================================================================
-
-def _ask(prompt: str, default):
-    """Запросить ввод с подсказкой; пустой ввод → default."""
-    raw = input(f"{prompt} [{default}]: ").strip()
-    if raw == "":
-        return default
-    return type(default)(raw)
-
-
-def _interactive_setup(repeats: int, threshold: float) -> tuple[int, float]:
-    """
-    Показать русское меню и дать пользователю изменить настройки.
-
-    Возвращает (repeats, threshold) — возможно изменённые.
-    """
-    print("\n=== Пакетные эксперименты — минимизация Eggholder ===")
-    print("Нажмите Enter для принятия значения по умолчанию.\n")
-
-    while True:
-        print(f"Текущие настройки: повторений = {repeats}, порог успеха dx = {threshold}")
-        print("Меню:")
-        print("  1) Запустить с текущими настройками")
-        print("  2) Изменить число повторений (REPEATS)")
-        print("  3) Изменить порог успеха dx (SUCCESS_DX_THRESHOLD)")
-        choice = input("Ваш выбор [1]: ").strip() or "1"
-
-        if choice == "1":
-            break
-        elif choice == "2":
-            raw = input(f"Число повторений [{repeats}]: ").strip()
-            if raw:
-                try:
-                    repeats = int(raw)
-                except ValueError:
-                    print("Ошибка: введите целое число.")
-        elif choice == "3":
-            raw = input(f"Порог успеха dx [{threshold}]: ").strip()
-            if raw:
-                try:
-                    threshold = float(raw)
-                except ValueError:
-                    print("Ошибка: введите число.")
-        else:
-            print("Неизвестный выбор, попробуйте снова.")
-
-    return repeats, threshold
-
-
-# ===========================================================================
 # Вспомогательная функция: запустить один эксперимент
 # ===========================================================================
 
@@ -258,151 +211,292 @@ def _run_one(config: dict, seed: int) -> tuple[dict, pd.DataFrame]:
 
 
 # ===========================================================================
-# Главная функция
+# Пакетный запуск (используется GUI)
 # ===========================================================================
 
-def main():
-    """Прогнать все эксперименты и сохранить CSV-файлы в out/."""
+def _run_batch(selected_configs: list[dict], repeats: int,
+               success_dx: float, progress_cb) -> tuple[pd.DataFrame,
+                                                         pd.DataFrame,
+                                                         pd.DataFrame]:
+    """
+    Запустить все выбранные конфигурации и вернуть (results_df, traces_df, summary_df).
 
+    progress_cb(msg: str) вызывается для обновления статуса.
+    """
     os.makedirs("out", exist_ok=True)
 
-    # -- Интерактивное меню: настройки до запуска ----------------------------
-    repeats, success_dx = _interactive_setup(REPEATS, SUCCESS_DX_THRESHOLD)
+    all_results: list[dict] = []
+    all_traces:  list[pd.DataFrame] = []
+    run_id = 0
 
-    all_results: list[dict]      = []   # строки для results.csv
-    all_traces:  list[pd.DataFrame] = []  # трассы для traces.csv
-
-    run_id = 0  # глобальный счётчик запусков
-
-    total_runs = len(EXPERIMENTS) * repeats
-    print(f"\nЗапускаем {len(EXPERIMENTS)} конфигураций × {repeats} повторений"
-          f" = {total_runs} запусков.")
-    print("=" * 60)
-
-    for exp_idx, config in enumerate(EXPERIMENTS):
+    for exp_idx, config in enumerate(selected_configs):
         variant = config.get("variant", config.get("algo", "?"))
         algo    = config["algo"]
-        print(f"\n[{exp_idx + 1}/{len(EXPERIMENTS)}] {algo} / {variant}")
-
-        seed_base = config.get("seed_base", 1000)  # базовый seed для серии
+        seed_base = config.get("seed_base", 1000)
 
         for rep in range(repeats):
             seed = seed_base + rep
-            print(f"  Повторение {rep + 1:3d}/{repeats} (seed={seed})...", end=" ")
-
+            progress_cb(
+                f"[{exp_idx + 1}/{len(selected_configs)}] "
+                f"{variant},  повторение {rep + 1}/{repeats}"
+            )
             try:
                 row, trace_df = _run_one(config, seed)
             except Exception as exc:
-                print(f"ОШИБКА: {exc}")
+                progress_cb(f"ОШИБКА: {exc}")
                 continue
 
             row["run_id"] = run_id
             all_results.append(row)
 
-            # Добавить run_id в трассу и сохранить
             trace_df = trace_df.copy()
             trace_df["run_id"]  = run_id
             trace_df["variant"] = variant
             trace_df["algo"]    = algo
-            # Переименовать колонку итераций в единое имя "iter"
             if "gen" in trace_df.columns:
                 trace_df.rename(columns={"gen": "iter"}, inplace=True)
             all_traces.append(trace_df)
-
             run_id += 1
-            print(f"best_f={row['best_f']:.4f}, dx={row['dx']:.4f}, "
-                  f"t={row['time_sec']:.2f}s")
 
-    # -----------------------------------------------------------------------
-    # Сохранить results.csv
-    # -----------------------------------------------------------------------
     results_df = pd.DataFrame(all_results)
+    if results_df.empty:
+        return results_df, pd.DataFrame(), pd.DataFrame()
+
     # Упорядочить столбцы
     cols_order = ["run_id", "algo", "variant", "params_json", "seed",
                   "best_x", "best_y", "best_f", "dx", "df",
                   "evals", "iters_or_gens", "time_sec"]
     results_df = results_df[cols_order]
-    results_path = os.path.join("out", "results.csv")
-    results_df.to_csv(results_path, index=False)
-    print(f"\nСохранено: {results_path}  ({len(results_df)} строк)")
+    results_df.to_csv(os.path.join("out", "results.csv"), index=False)
 
-    # -----------------------------------------------------------------------
-    # Сохранить traces.csv
-    # -----------------------------------------------------------------------
+    traces_df = pd.DataFrame()
     if all_traces:
         traces_df = pd.concat(all_traces, ignore_index=True)
-        # Выбрать нужные столбцы
-        trace_cols = ["run_id", "algo", "variant", "iter", "best_f", "mean_f", "best_dx"]
-        # Оставить только те, которые есть в DataFrame
-        trace_cols = [c for c in trace_cols if c in traces_df.columns]
-        traces_df  = traces_df[trace_cols]
-        traces_path = os.path.join("out", "traces.csv")
-        traces_df.to_csv(traces_path, index=False)
-        print(f"Сохранено: {traces_path}  ({len(traces_df)} строк)")
+        trace_cols = [c for c in
+                      ["run_id", "algo", "variant", "iter",
+                       "best_f", "mean_f", "best_dx"]
+                      if c in traces_df.columns]
+        traces_df = traces_df[trace_cols]
+        traces_df.to_csv(os.path.join("out", "traces.csv"), index=False)
 
-    # -----------------------------------------------------------------------
-    # Агрегировать и сохранить summary.csv
-    # -----------------------------------------------------------------------
-    if not results_df.empty:
-        summary_rows = []
-        for variant, grp in results_df.groupby("variant", sort=False):
-            algo_name = grp["algo"].iloc[0]
-            n = len(grp)
+    # Сводка
+    summary_rows = []
+    for variant_name, grp in results_df.groupby("variant", sort=False):
+        algo_name = grp["algo"].iloc[0]
+        n = len(grp)
+        success_mask = grp["dx"] < success_dx
+        summary_rows.append({
+            "algo":          algo_name,
+            "variant":       variant_name,
+            "repeats":       n,
+            "mean_best_f":   grp["best_f"].mean(),
+            "std_best_f":    grp["best_f"].std(),
+            "median_best_f": grp["best_f"].median(),
+            "min_best_f":    grp["best_f"].min(),
+            "max_best_f":    grp["best_f"].max(),
+            "mean_dx":       grp["dx"].mean(),
+            "std_dx":        grp["dx"].std(),
+            "success_rate":  float(success_mask.sum()) / n,
+            "mean_time_sec": grp["time_sec"].mean(),
+            "mean_evals":    grp["evals"].mean(),
+        })
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(os.path.join("out", "summary.csv"), index=False)
 
-            success_mask = grp["dx"] < success_dx
-            success_rate = float(success_mask.sum()) / n  # доля успешных запусков
-
-            summary_rows.append({
-                "algo":          algo_name,
-                "variant":       variant,
-                "repeats":       n,
-                "mean_best_f":   grp["best_f"].mean(),
-                "std_best_f":    grp["best_f"].std(),
-                "median_best_f": grp["best_f"].median(),
-                "min_best_f":    grp["best_f"].min(),
-                "max_best_f":    grp["best_f"].max(),
-                "mean_dx":       grp["dx"].mean(),
-                "std_dx":        grp["dx"].std(),
-                "median_dx":     grp["dx"].median(),
-                "min_dx":        grp["dx"].min(),
-                "max_dx":        grp["dx"].max(),
-                "success_rate":  success_rate,
-                "mean_time_sec": grp["time_sec"].mean(),
-                "mean_evals":    grp["evals"].mean(),
-            })
-
-        summary_df  = pd.DataFrame(summary_rows)
-        summary_path = os.path.join("out", "summary.csv")
-        summary_df.to_csv(summary_path, index=False)
-        print(f"Сохранено: {summary_path}  ({len(summary_df)} строк)")
-
-        # Краткая сводка в консоли
-        print("\n=== Сводка результатов ===")
-        pd.set_option("display.max_columns", None)
-        pd.set_option("display.width", 120)
-        pd.set_option("display.float_format", "{:.4f}".format)
-        print(summary_df.to_string(index=False))
-
-    # -----------------------------------------------------------------------
-    # Сохранить experiment_meta.json — используется make_plots.py
-    # -----------------------------------------------------------------------
     meta = {
-        "created_at":           datetime.datetime.now().isoformat(timespec="seconds"),
+        "created_at":           datetime.datetime.now().isoformat(
+                                    timespec="seconds"),
         "repeats":              repeats,
         "SUCCESS_DX_THRESHOLD": success_dx,
-        "number_of_variants":   len(EXPERIMENTS),
-        "total_runs":           run_id,          # реально завершённых
+        "number_of_variants":   len(selected_configs),
+        "total_runs":           run_id,
         "bounds":               [list(b) for b in BOUNDS],
         "true_min":             list(TRUE_MIN),
         "true_f":               TRUE_F,
     }
-    meta_path = os.path.join("out", "experiment_meta.json")
-    with open(meta_path, "w", encoding="utf-8") as fh:
+    with open(os.path.join("out", "experiment_meta.json"),
+              "w", encoding="utf-8") as fh:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
-    print(f"Сохранено: {meta_path}")
 
-    print("\nГотово.")
+    return results_df, traces_df, summary_df
+
+
+# ===========================================================================
+# GUI
+# ===========================================================================
+
+def main():
+    """Точка входа при запуске `python run_experiments.py` — открывает GUI."""
+    q: _queue.Queue = _queue.Queue()
+
+    root = tk.Tk()
+    root.title("Пакетные эксперименты — Eggholder")
+    root.resizable(False, False)
+
+    # ---- Настройки ----
+    sf = ttk.LabelFrame(root, text="Настройки", padding=8)
+    sf.grid(row=0, column=0, padx=10, pady=8, sticky="ew")
+
+    ttk.Label(sf, text="Повторений:").grid(row=0, column=0, sticky="w",
+                                           padx=4, pady=2)
+    rep_var = tk.StringVar(value=str(REPEATS))
+    ttk.Entry(sf, textvariable=rep_var, width=10).grid(row=0, column=1,
+                                                        sticky="w", padx=4)
+
+    ttk.Label(sf, text="Порог успеха dx:").grid(row=1, column=0, sticky="w",
+                                                 padx=4, pady=2)
+    dx_var = tk.StringVar(value=str(SUCCESS_DX_THRESHOLD))
+    ttk.Entry(sf, textvariable=dx_var, width=10).grid(row=1, column=1,
+                                                       sticky="w", padx=4)
+
+    # ---- Варианты ----
+    vf = ttk.LabelFrame(root, text="Варианты экспериментов", padding=8)
+    vf.grid(row=1, column=0, padx=10, pady=4, sticky="ew")
+
+    checks: list[tuple[tk.BooleanVar, dict]] = []
+    for cfg in EXPERIMENTS:
+        var = tk.BooleanVar(value=True)
+        name = cfg.get("variant", cfg.get("algo", "?"))
+        ttk.Checkbutton(vf, text=f"{cfg['algo']} / {name}",
+                        variable=var).pack(anchor="w")
+        checks.append((var, cfg))
+
+    # ---- Управление ----
+    cf = ttk.Frame(root, padding=8)
+    cf.grid(row=2, column=0, sticky="ew")
+
+    run_btn = ttk.Button(cf, text="Запустить")
+    run_btn.grid(row=0, column=0, padx=4, pady=4)
+
+    def _open_out():
+        folder = os.path.abspath("out")
+        os.makedirs(folder, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(folder)
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
+    ttk.Button(cf, text="Открыть папку out",
+               command=_open_out).grid(row=0, column=1, padx=4)
+
+    status_var = tk.StringVar(value="Готово")
+    ttk.Label(cf, textvariable=status_var,
+              font=("", 10, "bold")).grid(row=1, column=0, columnspan=2,
+                                          sticky="w", padx=4)
+
+    pb_var = tk.IntVar(value=0)
+    ttk.Progressbar(cf, variable=pb_var, maximum=100,
+                    length=400, mode="determinate").grid(
+        row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
+
+    prog_lbl = tk.StringVar(value="")
+    ttk.Label(cf, textvariable=prog_lbl, wraplength=400).grid(
+        row=3, column=0, columnspan=2, sticky="w", padx=4)
+
+    # ---- Сводная таблица ----
+    tf = ttk.LabelFrame(root, text="Сводка результатов (top 5)", padding=8)
+    tf.grid(row=3, column=0, padx=10, pady=8, sticky="nsew")
+
+    tree_cols = ("variant", "mean_best_f", "success_rate",
+                 "mean_dx", "mean_evals")
+    tree = ttk.Treeview(tf, columns=tree_cols, show="headings", height=5)
+    tree.heading("variant",      text="Вариант")
+    tree.heading("mean_best_f",  text="Среднее f")
+    tree.heading("success_rate", text="Успех %")
+    tree.heading("mean_dx",      text="Среднее dx")
+    tree.heading("mean_evals",   text="Вычислений")
+    tree.column("variant",      width=160)
+    tree.column("mean_best_f",  width=100)
+    tree.column("success_rate", width=80)
+    tree.column("mean_dx",      width=100)
+    tree.column("mean_evals",   width=100)
+    tree.grid(row=0, column=0, sticky="nsew")
+    sb = ttk.Scrollbar(tf, orient="vertical", command=tree.yview)
+    sb.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=sb.set)
+
+    def _fill_tree(summary_df: pd.DataFrame):
+        for row in tree.get_children():
+            tree.delete(row)
+        for _, r in summary_df.head(5).iterrows():
+            tree.insert("", "end", values=(
+                r["variant"],
+                f"{r['mean_best_f']:.4f}",
+                f"{r['success_rate'] * 100:.1f}%",
+                f"{r['mean_dx']:.4f}",
+                f"{r['mean_evals']:.0f}",
+            ))
+
+    def _worker():
+        try:
+            repeats   = int(rep_var.get())
+            success_dx = float(dx_var.get())
+        except ValueError as exc:
+            q.put(("error", f"Ошибка в параметрах: {exc}"))
+            return
+
+        selected = [cfg for var, cfg in checks if var.get()]
+        if not selected:
+            q.put(("error", "Не выбрано ни одного варианта."))
+            return
+
+        total_runs = len(selected) * repeats
+        done_runs  = [0]
+
+        def progress_cb(msg: str):
+            done_runs[0] += 1
+            pct = int(done_runs[0] / max(total_runs, 1) * 100)
+            q.put(("progress", msg, pct))
+
+        try:
+            results_df, traces_df, summary_df = _run_batch(
+                selected, repeats, success_dx, progress_cb)
+            q.put(("done", summary_df))
+        except Exception as exc:
+            q.put(("error", str(exc)))
+
+    def _start():
+        run_btn.config(state="disabled")
+        pb_var.set(0)
+        prog_lbl.set("")
+        status_var.set("Выполняется…")
+        for row in tree.get_children():
+            tree.delete(row)
+        threading.Thread(target=_worker, daemon=True).start()
+        root.after(100, _poll)
+
+    def _poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                if msg[0] == "progress":
+                    _, text, pct = msg
+                    pb_var.set(pct)
+                    prog_lbl.set(text)
+                elif msg[0] == "done":
+                    summary_df = msg[1]
+                    status_var.set("Готово")
+                    pb_var.set(100)
+                    prog_lbl.set(
+                        "Сохранено: out/results.csv, out/traces.csv, "
+                        "out/summary.csv, out/experiment_meta.json")
+                    if not summary_df.empty:
+                        _fill_tree(summary_df)
+                    run_btn.config(state="normal")
+                    return
+                elif msg[0] == "error":
+                    status_var.set("Ошибка")
+                    messagebox.showerror("Ошибка", msg[1])
+                    run_btn.config(state="normal")
+                    return
+        except _queue.Empty:
+            pass
+        root.after(100, _poll)
+
+    run_btn.config(command=_start)
+    root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+

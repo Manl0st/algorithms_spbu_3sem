@@ -7,12 +7,9 @@ ga_app.py
   - binary  : вещественные переменные кодируются цепочкой битов
   - real    : вещественные переменные хранятся напрямую
 
-Запуск в интерактивном режиме::
+Запуск (открывает GUI-окно)::
 
     python ga_app.py
-
-Программа задаёт вопросы через input(); нажмите Enter, чтобы принять значение
-по умолчанию.
 
 Для использования из run_experiments.py доступна функция::
 
@@ -22,27 +19,21 @@ ga_app.py
 import json
 import math
 import os
+import queue as _queue
+import subprocess
+import threading
 import time
 
 import numpy as np
 import pandas as pd
+import tkinter as tk
+from tkinter import ttk, messagebox
 
 from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции общего назначения
 # ---------------------------------------------------------------------------
-
-def _ask(prompt: str, default):
-    """
-    Вывести подсказку с дефолтом и считать ввод пользователя.
-    Если пользователь нажимает Enter (пустой ввод), возвращается default.
-    """
-    raw = input(f"{prompt} [{default}]: ").strip()
-    if raw == "":
-        return default
-    return type(default)(raw)
-
 
 def _clip(value: float, lo: float, hi: float) -> float:
     """Ограничить value отрезком [lo, hi]."""
@@ -278,7 +269,7 @@ def _mutate_real(chromosome: np.ndarray, rate: float, sigma: float,
 # Основной алгоритм ГА
 # ===========================================================================
 
-def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
+def run_ga(params: dict, callback=None) -> tuple[dict, pd.DataFrame]:
     """
     Запустить генетический алгоритм с заданными параметрами.
 
@@ -297,6 +288,9 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
     stop_eps_f      : float — останов, если улучшение best_f < eps_f (порог по функции)
     stop_eps_dx     : float — останов, если best_dx < eps_dx (0 = отключён)
     no_improve_patience : int — останов, если нет улучшения N поколений
+    callback : callable, optional
+        Вызывается на каждом поколении: callback(gen, total_gens, best_f).
+        Используется GUI для отображения прогресса.
 
     Возвращает
     ----------
@@ -363,6 +357,9 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
             "best_y":      by,
             "evals_so_far": obj.evals,
         })
+
+        if callback is not None:
+            callback(gen, generations, best_f)
 
         # 2. Критерий останова по улучшению функции.
         #    Улучшением считается уменьшение best_f более чем на eps_f.
@@ -458,91 +455,196 @@ def run_ga(params: dict) -> tuple[dict, pd.DataFrame]:
     return result, trace_df
 
 
+
 # ===========================================================================
-# Интерактивный запуск
+# GUI
 # ===========================================================================
-
-def _interactive_params() -> dict:
-    """Спросить у пользователя параметры через input() с дефолтами."""
-
-    print("\n=== Генетический алгоритм — Eggholder ===")
-    print("Нажмите Enter для принятия значения по умолчанию.\n")
-
-    enc = _ask("Кодирование (binary / real)", "binary")
-    if enc not in ("binary", "real"):
-        print(f"Неизвестное кодирование '{enc}', используется 'binary'.")
-        enc = "binary"
-
-    bits = 20
-    if enc == "binary":
-        bits = int(_ask("Bits per variable", 20))
-
-    pop_size    = int(_ask("Размер популяции (pop_size)", 50))
-    generations = int(_ask("Число поколений (generations)", 300))
-
-    # тип кроссинговера зависит от кодирования
-    if enc == "binary":
-        cx_type = _ask("Тип кроссинговера (one_point / two_point / uniform)", "one_point")
-    else:
-        cx_type = "arithmetic"
-        print(f"Кроссинговер для real: arithmetic (фиксировано)")
-
-    cx_rate  = float(_ask("Вероятность кроссинговера (crossover_rate)", 0.9))
-    mut_rate = float(_ask("Вероятность мутации (mutation_rate)", 0.02))
-    tourn_k  = int(_ask("Размер турнира (tournament_k)", 3))
-    elitism  = int(_ask("Число элитных особей (elitism)", 1))
-    seed     = int(_ask("Начальный seed", 42))
-    eps_f    = float(_ask("Порог улучшения функции stop_eps_f", 1e-6))
-    eps_dx   = float(_ask("Порог останова по dx stop_eps_dx (0 = отключён)", 0.0))
-    patience = int(_ask("Терпение без улучшения (no_improve_patience)", 80))
-
-    return {
-        "encoding":            enc,
-        "bits_per_var":        bits,
-        "pop_size":            pop_size,
-        "generations":         generations,
-        "crossover_type":      cx_type,
-        "crossover_rate":      cx_rate,
-        "mutation_rate":       mut_rate,
-        "tournament_k":        tourn_k,
-        "elitism":             elitism,
-        "seed":                seed,
-        "stop_eps_f":          eps_f,
-        "stop_eps_dx":         eps_dx,
-        "no_improve_patience": patience,
-    }
-
 
 def main():
-    """Точка входа при запуске `python ga_app.py`."""
+    """Точка входа при запуске `python ga_app.py` — открывает GUI-окно."""
+    q: _queue.Queue = _queue.Queue()
 
-    params   = _interactive_params()
-    result, trace_df = run_ga(params)
+    root = tk.Tk()
+    root.title("ГА — Eggholder")
+    root.resizable(False, False)
 
-    # -- вывод результатов ---------------------------------------------------
-    print("\n--- Результаты GA ---")
-    print(f"  Лучшая точка  : x = {result['best_x']:.6f}, y = {result['best_y']:.6f}")
-    print(f"  f(x*, y*)     : {result['best_f']:.6f}")
-    print(f"  dx до истины  : {result['dx']:.6f}")
-    print(f"  df = f - f*   : {result['df']:.6f}")
-    print(f"  Вычислений f  : {result['evals']}")
-    print(f"  Поколений     : {result['gens_done']}")
-    print(f"  Время         : {result['time_sec']:.3f} с")
+    # ---- Параметры ----
+    pf = ttk.LabelFrame(root, text="Параметры", padding=8)
+    pf.grid(row=0, column=0, padx=10, pady=8, sticky="nsew")
 
-    # -- сохранение результатов ----------------------------------------------
-    os.makedirs("out", exist_ok=True)
+    def _row(parent, row, label, default, choices=None):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w",
+                                           padx=4, pady=2)
+        var = tk.StringVar(value=str(default))
+        if choices:
+            w = ttk.Combobox(parent, textvariable=var, values=choices,
+                             state="readonly", width=22)
+        else:
+            w = ttk.Entry(parent, textvariable=var, width=24)
+        w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+        return var, w
 
-    # JSON с параметрами и итогами
-    json_path = os.path.join("out", "ga_last_result.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nРезультат сохранён: {json_path}")
+    enc_var,   enc_cb  = _row(pf,  0, "Кодирование:",           "binary",
+                              ["binary", "real"])
+    bits_var,  bits_e  = _row(pf,  1, "Бит на переменную:",     "20")
+    pop_var,   _       = _row(pf,  2, "Размер популяции:",      "50")
+    gen_var,   _       = _row(pf,  3, "Поколений:",              "300")
+    cx_var,    cx_cb   = _row(pf,  4, "Кроссинговер:",           "one_point",
+                              ["one_point", "two_point", "uniform"])
+    cxr_var,   _       = _row(pf,  5, "Вер. кроссинговера:",    "0.9")
+    mut_var,   _       = _row(pf,  6, "Вер. мутации:",           "0.02")
+    tk_var,    _       = _row(pf,  7, "Размер турнира:",         "3")
+    eli_var,   _       = _row(pf,  8, "Элитизм:",                "1")
+    seed_var,  _       = _row(pf,  9, "Seed:",                   "42")
+    epsf_var,  _       = _row(pf, 10, "stop_eps_f:",              "1e-6")
+    epsdx_var, _       = _row(pf, 11, "stop_eps_dx (0=откл.):",  "0.0")
+    pat_var,   _       = _row(pf, 12, "Терпение:",                "80")
 
-    # CSV с трассой по поколениям
-    csv_path = os.path.join("out", "ga_last_trace.csv")
-    trace_df.to_csv(csv_path, index=False)
-    print(f"Трасса сохранена : {csv_path}")
+    def _on_enc(*_):
+        if enc_var.get() == "real":
+            bits_e.config(state="disabled")
+            cx_var.set("arithmetic")
+            cx_cb.config(state="disabled", values=["arithmetic"])
+        else:
+            bits_e.config(state="normal")
+            cx_cb.config(state="readonly",
+                         values=["one_point", "two_point", "uniform"])
+            if cx_var.get() == "arithmetic":
+                cx_var.set("one_point")
+
+    enc_var.trace_add("write", _on_enc)
+
+    # ---- Управление ----
+    cf = ttk.Frame(root, padding=8)
+    cf.grid(row=1, column=0, sticky="ew")
+
+    run_btn = ttk.Button(cf, text="Запустить")
+    run_btn.grid(row=0, column=0, padx=4, pady=4)
+
+    def _open_out():
+        folder = os.path.abspath("out")
+        os.makedirs(folder, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(folder)
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
+    ttk.Button(cf, text="Открыть папку out",
+               command=_open_out).grid(row=0, column=1, padx=4)
+
+    status_var = tk.StringVar(value="Готово")
+    ttk.Label(cf, textvariable=status_var,
+              font=("", 10, "bold")).grid(row=1, column=0, columnspan=2,
+                                          sticky="w", padx=4)
+
+    pb_var = tk.IntVar(value=0)
+    ttk.Progressbar(cf, variable=pb_var, maximum=100,
+                    length=350, mode="determinate").grid(
+        row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
+
+    pb_lbl = tk.StringVar(value="")
+    ttk.Label(cf, textvariable=pb_lbl).grid(row=3, column=0, columnspan=2,
+                                             sticky="w", padx=4)
+
+    # ---- Результаты ----
+    rf = ttk.LabelFrame(root, text="Результаты", padding=8)
+    rf.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
+
+    res_txt = tk.Text(rf, height=7, width=54, state="disabled",
+                      font=("Courier", 9))
+    res_txt.grid(row=0, column=0, sticky="nsew")
+
+    def _show(r):
+        res_txt.config(state="normal")
+        res_txt.delete("1.0", "end")
+        res_txt.insert("end",
+                       f"Лучшая точка : x = {r['best_x']:.6f},  "
+                       f"y = {r['best_y']:.6f}\n")
+        res_txt.insert("end", f"f(x*, y*)     = {r['best_f']:.6f}\n")
+        res_txt.insert("end", f"dx до истины  = {r['dx']:.6f}\n")
+        res_txt.insert("end", f"df = f − f*   = {r['df']:.6f}\n")
+        res_txt.insert("end", f"Вычислений f  : {r['evals']}\n")
+        res_txt.insert("end", f"Поколений     : {r['gens_done']}\n")
+        res_txt.insert("end", f"Время         : {r['time_sec']:.3f} с\n")
+        res_txt.config(state="disabled")
+
+    def _worker():
+        try:
+            params = {
+                "encoding":            enc_var.get(),
+                "bits_per_var":        int(bits_var.get()),
+                "pop_size":            int(pop_var.get()),
+                "generations":         int(gen_var.get()),
+                "crossover_type":      cx_var.get(),
+                "crossover_rate":      float(cxr_var.get()),
+                "mutation_rate":       float(mut_var.get()),
+                "tournament_k":        int(tk_var.get()),
+                "elitism":             int(eli_var.get()),
+                "seed":                int(seed_var.get()),
+                "stop_eps_f":          float(epsf_var.get()),
+                "stop_eps_dx":         float(epsdx_var.get()),
+                "no_improve_patience": int(pat_var.get()),
+            }
+        except ValueError as exc:
+            q.put(("error", f"Ошибка в параметрах: {exc}"))
+            return
+
+        def cb(gen, gens, best_f):
+            pct = int(gen / max(gens, 1) * 100)
+            q.put(("progress", gen, gens, best_f, pct))
+
+        try:
+            result, trace_df = run_ga(params, callback=cb)
+            q.put(("done", result, trace_df))
+        except Exception as exc:
+            q.put(("error", str(exc)))
+
+    def _start():
+        run_btn.config(state="disabled")
+        pb_var.set(0)
+        pb_lbl.set("")
+        status_var.set("Выполняется…")
+        threading.Thread(target=_worker, daemon=True).start()
+        root.after(50, _poll)
+
+    def _poll():
+        try:
+            while True:
+                msg = q.get_nowait()
+                if msg[0] == "progress":
+                    _, gen, gens, best_f, pct = msg
+                    pb_var.set(pct)
+                    pb_lbl.set(
+                        f"Поколение {gen}/{gens},  best_f = {best_f:.4f}")
+                elif msg[0] == "done":
+                    result, trace_df = msg[1], msg[2]
+                    status_var.set("Готово")
+                    pb_var.set(100)
+                    _show(result)
+                    os.makedirs("out", exist_ok=True)
+                    with open(os.path.join("out", "ga_last_result.json"),
+                              "w", encoding="utf-8") as fh:
+                        json.dump(result, fh, ensure_ascii=False, indent=2)
+                    trace_df.to_csv(
+                        os.path.join("out", "ga_last_trace.csv"), index=False)
+                    pb_lbl.set(
+                        "Сохранено: out/ga_last_result.json, "
+                        "out/ga_last_trace.csv")
+                    run_btn.config(state="normal")
+                    return
+                elif msg[0] == "error":
+                    status_var.set("Ошибка")
+                    messagebox.showerror("Ошибка", msg[1])
+                    run_btn.config(state="normal")
+                    return
+        except _queue.Empty:
+            pass
+        root.after(50, _poll)
+
+    run_btn.config(command=_start)
+    root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+
