@@ -26,14 +26,19 @@ pso_app.py
 import json
 import math
 import os
-import queue as _queue
-import threading
 import time
 
 import numpy as np
 import pandas as pd
-import tkinter as tk
-from tkinter import ttk, messagebox
+
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
+    QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+)
+import pyqtgraph as pg
 
 from objective import BOUNDS, TRUE_F, TRUE_MIN, CounterObjective
 
@@ -292,308 +297,325 @@ _MODE_LABELS = {
 }
 _MODE_LABELS_INV = {v: k for k, v in _MODE_LABELS.items()}
 
-# Размер холста визуализации (пиксели)
-_VIZ_SIZE = 420
+# Трасса PSO с русскими заголовками столбцов
+_TRACE_RU_COLUMNS = {
+    "iter":    "итерация",
+    "best_f":  "лучшее_f",
+    "mean_f":  "среднее_f",
+    "best_dx": "dx_лучшей",
+    "gbest_x": "лучший_x",
+    "gbest_y": "лучший_y",
+}
 
 
-def _world_to_canvas(x: float, y: float, size: int = _VIZ_SIZE) -> tuple[int, int]:
-    """Перевести мировые координаты (x, y) в координаты холста."""
-    bx_lo, bx_hi = BOUNDS[0]
-    by_lo, by_hi = BOUNDS[1]
-    cx = int((x - bx_lo) / (bx_hi - bx_lo) * (size - 1))
-    cy = int((1.0 - (y - by_lo) / (by_hi - by_lo)) * (size - 1))  # Y перевёрнут
-    return max(0, min(size - 1, cx)), max(0, min(size - 1, cy))
+class _PSOWorker(QThread):
+    """Рабочий поток для запуска PSO без блокировки UI."""
+
+    progress = pyqtSignal(int, int, float, object, object)  # it, total, gbest_val, positions_xy, gbest_xy
+    done     = pyqtSignal(dict, object)   # result, trace_df
+    error    = pyqtSignal(str)
+
+    def __init__(self, params: dict):
+        super().__init__()
+        self._params = params
+
+    def run(self):
+        def cb(it, total, gbest_val, positions_xy=None, gbest_xy=None):
+            self.progress.emit(it, total, gbest_val, positions_xy, gbest_xy)
+
+        try:
+            result, trace_df = run_pso(self._params, callback=cb)
+            self.done.emit(result, trace_df)
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
-def main():
-    """Точка входа при запуске `python pso_app.py` — открывает GUI-окно."""
-    q: _queue.Queue = _queue.Queue()
+class _PSOWindow(QWidget):
+    """Главное окно PSO — Eggholder."""
 
-    root = tk.Tk()
-    root.title("PSO — Eggholder")
-    root.resizable(False, False)
+    _TRAIL_LEN = 30
 
-    # =========================================================================
-    # Переменные параметров (только ключевые)
-    # =========================================================================
-    mode_var  = tk.StringVar(value="Без коэффициента сжатия")
-    swarm_var = tk.StringVar(value="30")
-    iters_var = tk.StringVar(value="300")
-    w_var     = tk.StringVar(value="0.7")
-    c1_var    = tk.StringVar(value="1.5")
-    c2_var    = tk.StringVar(value="1.5")
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("PSO — Eggholder")
+        self._best_trail: list[tuple[float, float]] = []
+        self._worker: _PSOWorker | None = None
+        # Кэш значений w/c1/c2 для каждого режима
+        self._mode_cache = {
+            "basic":        {"w": "0.7",   "c1": "1.5",  "c2": "1.5"},
+            "constriction": {"c1": "2.05", "c2": "2.05"},
+        }
+        self._current_mode = "basic"
+        self._build_ui()
 
-    # Кэш значений w/c1/c2 для каждого режима
-    _mode_cache = {
-        "basic":        {"w": "0.7",   "c1": "1.5",  "c2": "1.5"},
-        "constriction": {"c1": "2.05", "c2": "2.05"},
-    }
-    _current_mode = ["basic"]
+    # ------------------------------------------------------------------
+    # Построение UI
+    # ------------------------------------------------------------------
 
-    # =========================================================================
-    # Основной контейнер (2 колонки: параметры + визуализация)
-    # =========================================================================
-    main_frame = ttk.Frame(root)
-    main_frame.grid(row=0, column=0, sticky="nsew")
+    def _build_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(8, 8, 8, 8)
 
-    # ----- Левая колонка: параметры -----
-    pf = ttk.LabelFrame(main_frame, text="Параметры PSO", padding=8)
-    pf.grid(row=0, column=0, padx=(10, 5), pady=8, sticky="nw")
+        # ---- Верхняя строка: параметры + визуализация ----
+        top_row = QHBoxLayout()
+        root_layout.addLayout(top_row)
 
-    def _field(parent, row, label, var, choices=None, width=18):
-        ttk.Label(parent, text=label).grid(
-            row=row, column=0, sticky="w", padx=4, pady=3)
-        if choices:
-            wgt = ttk.Combobox(parent, textvariable=var, values=choices,
-                               state="readonly", width=width)
-        else:
-            wgt = ttk.Entry(parent, textvariable=var, width=width + 2)
-        wgt.grid(row=row, column=1, sticky="w", padx=4, pady=3)
-        return wgt
+        # Левая колонка: параметры
+        params_box = QGroupBox("Параметры PSO")
+        params_layout = QFormLayout(params_box)
+        params_layout.setContentsMargins(8, 12, 8, 8)
+        params_layout.setSpacing(6)
+        top_row.addWidget(params_box, stretch=0)
 
-    _field(pf, 0, "Модификация:", mode_var, list(_MODE_LABELS.keys()),
-           width=22)
-    _field(pf, 1, "Число частиц:", swarm_var)
-    _field(pf, 2, "Число итераций:", iters_var)
-    w_entry = _field(pf, 3, "w:", w_var)
-    _field(pf, 4, "c1:", c1_var)
-    _field(pf, 5, "c2:", c2_var)
+        self._mode_cb   = QComboBox(); self._mode_cb.addItems(list(_MODE_LABELS.keys()))
+        self._mode_cb.setMinimumWidth(200)
+        self._swarm_ed  = QLineEdit("30");   self._swarm_ed.setMaximumWidth(80)
+        self._iters_ed  = QLineEdit("300");  self._iters_ed.setMaximumWidth(80)
+        self._w_ed      = QLineEdit("0.7");  self._w_ed.setMaximumWidth(80)
+        self._c1_ed     = QLineEdit("1.5");  self._c1_ed.setMaximumWidth(80)
+        self._c2_ed     = QLineEdit("1.5");  self._c2_ed.setMaximumWidth(80)
 
-    def _on_mode(*_):
-        new_mode = _MODE_LABELS.get(mode_var.get(), "basic")
-        old_mode = _current_mode[0]
+        params_layout.addRow("Модификация:",    self._mode_cb)
+        params_layout.addRow("Число частиц:",   self._swarm_ed)
+        params_layout.addRow("Число итераций:", self._iters_ed)
+        params_layout.addRow("w:",              self._w_ed)
+        params_layout.addRow("c1:",             self._c1_ed)
+        params_layout.addRow("c2:",             self._c2_ed)
+
+        self._mode_cb.currentTextChanged.connect(self._on_mode_changed)
+
+        # Правая колонка: визуализация
+        viz_box = QGroupBox("Визуализация роя")
+        viz_layout = QVBoxLayout(viz_box)
+        viz_layout.setContentsMargins(6, 12, 6, 6)
+        viz_layout.setSpacing(4)
+        top_row.addWidget(viz_box, stretch=1)
+
+        pg.setConfigOptions(antialias=True, background="#1a1a2e", foreground="#cccccc")
+        self._plot = pg.PlotWidget()
+        self._plot.setMinimumSize(440, 440)
+        self._plot.setAspectLocked(True)
+        bx_lo, bx_hi = BOUNDS[0]
+        by_lo, by_hi = BOUNDS[1]
+        self._plot.setXRange(bx_lo, bx_hi, padding=0)
+        self._plot.setYRange(by_lo, by_hi, padding=0)
+        self._plot.getAxis("bottom").setLabel("x")
+        self._plot.getAxis("left").setLabel("y")
+        viz_layout.addWidget(self._plot)
+
+        # Легенда
+        legend_lbl = QLabel("● Синие: частицы   ● Оранжевая: лучший   ★ Красная: минимум")
+        legend_lbl.setStyleSheet("color: #888888; font-size: 9px;")
+        viz_layout.addWidget(legend_lbl)
+
+        # Живая статистика
+        self._info_lbl = QLabel("")
+        mono = QFont("Monospace", 9)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self._info_lbl.setFont(mono)
+        self._info_lbl.setStyleSheet("color: #4488cc;")
+        viz_layout.addWidget(self._info_lbl)
+
+        # Постоянные элементы графика
+        self._swarm_scatter = pg.ScatterPlotItem(size=6,  pen=None, brush=pg.mkBrush("#4488cc"))
+        self._best_scatter  = pg.ScatterPlotItem(size=12, pen=pg.mkPen("#ffffff", width=1),
+                                                 brush=pg.mkBrush("#ff8800"))
+        self._trail_curve   = pg.PlotCurveItem(pen=pg.mkPen("#00cc44", width=1.5))
+        self._true_min_sct  = pg.ScatterPlotItem(
+            pos=[[TRUE_MIN[0], TRUE_MIN[1]]], size=16,
+            symbol="star", pen=pg.mkPen("#ff4444", width=1),
+            brush=pg.mkBrush("#ff4444"))
+
+        self._plot.addItem(self._trail_curve)
+        self._plot.addItem(self._swarm_scatter)
+        self._plot.addItem(self._best_scatter)
+        self._plot.addItem(self._true_min_sct)
+
+        # ---- Управление ----
+        ctrl_layout = QHBoxLayout()
+        root_layout.addLayout(ctrl_layout)
+
+        self._run_btn = QPushButton("▶  Запустить")
+        self._run_btn.clicked.connect(self._on_start)
+        ctrl_layout.addWidget(self._run_btn)
+
+        self._status_lbl = QLabel("Готово")
+        bold = QFont(); bold.setBold(True); bold.setPointSize(10)
+        self._status_lbl.setFont(bold)
+        ctrl_layout.addWidget(self._status_lbl)
+        ctrl_layout.addStretch()
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setMaximum(100)
+        self._progress_bar.setValue(0)
+        root_layout.addWidget(self._progress_bar)
+
+        self._pb_lbl = QLabel("")
+        self._pb_lbl.setStyleSheet("font-size: 8pt;")
+        root_layout.addWidget(self._pb_lbl)
+
+        # ---- Результаты ----
+        res_box = QGroupBox("Результаты")
+        res_layout = QVBoxLayout(res_box)
+        root_layout.addWidget(res_box)
+
+        self._res_txt = QTextEdit()
+        self._res_txt.setReadOnly(True)
+        mono2 = QFont("Monospace", 9)
+        mono2.setStyleHint(QFont.StyleHint.Monospace)
+        self._res_txt.setFont(mono2)
+        self._res_txt.setFixedHeight(150)
+        res_layout.addWidget(self._res_txt)
+
+    # ------------------------------------------------------------------
+    # Логика UI
+    # ------------------------------------------------------------------
+
+    def _on_mode_changed(self, text: str):
+        new_mode = _MODE_LABELS.get(text, "basic")
+        old_mode = self._current_mode
         if new_mode == old_mode:
             return
         # Сохранить текущие значения в кэш старого режима
-        _mode_cache[old_mode]["c1"] = c1_var.get()
-        _mode_cache[old_mode]["c2"] = c2_var.get()
+        self._mode_cache[old_mode]["c1"] = self._c1_ed.text()
+        self._mode_cache[old_mode]["c2"] = self._c2_ed.text()
         if old_mode == "basic":
-            _mode_cache[old_mode]["w"] = w_var.get()
+            self._mode_cache[old_mode]["w"] = self._w_ed.text()
         # Загрузить значения нового режима
-        _current_mode[0] = new_mode
-        cached = _mode_cache[new_mode]
-        c1_var.set(cached["c1"])
-        c2_var.set(cached["c2"])
+        self._current_mode = new_mode
+        cached = self._mode_cache[new_mode]
+        self._c1_ed.setText(cached["c1"])
+        self._c2_ed.setText(cached["c2"])
         if new_mode == "constriction":
-            w_entry.config(state="disabled")
+            self._w_ed.setEnabled(False)
         else:
-            w_entry.config(state="normal")
-            w_var.set(cached.get("w", "0.7"))
+            self._w_ed.setEnabled(True)
+            self._w_ed.setText(cached.get("w", "0.7"))
 
-    mode_var.trace_add("write", _on_mode)
+    def _clear_viz(self):
+        self._best_trail.clear()
+        self._swarm_scatter.setData([], [])
+        self._best_scatter.setData([], [])
+        self._trail_curve.setData([], [])
+        self._info_lbl.setText("")
 
-    # ----- Правая колонка: визуализация -----
-    vf = ttk.LabelFrame(main_frame, text="Визуализация роя", padding=4)
-    vf.grid(row=0, column=1, padx=(5, 10), pady=8, sticky="n")
+    def _redraw_viz(self, it: int, total: int, gbest_val: float,
+                    positions_xy, gbest_xy):
+        if gbest_xy is not None:
+            self._best_trail.append((float(gbest_xy[0]), float(gbest_xy[1])))
+            if len(self._best_trail) > self._TRAIL_LEN:
+                del self._best_trail[:-self._TRAIL_LEN]
 
-    viz_canvas = tk.Canvas(vf, width=_VIZ_SIZE, height=_VIZ_SIZE,
-                           bg="#1a1a2e", highlightthickness=1,
-                           highlightbackground="#555555")
-    viz_canvas.grid(row=0, column=0, sticky="nsew")
+        # Trail
+        if len(self._best_trail) >= 2:
+            tx = [p[0] for p in self._best_trail]
+            ty = [p[1] for p in self._best_trail]
+            self._trail_curve.setData(tx, ty)
 
-    # Истинный минимум (рисуется один раз)
-    _TRUE_CX, _TRUE_CY = _world_to_canvas(TRUE_MIN[0], TRUE_MIN[1])
-    viz_canvas.create_text(_TRUE_CX, _TRUE_CY, text="★",
-                            fill="#ff4444", font=("", 14, "bold"), tags="true_min")
+        # Swarm
+        if positions_xy is not None and len(positions_xy) > 0:
+            self._swarm_scatter.setData(
+                x=positions_xy[:, 0].tolist(),
+                y=positions_xy[:, 1].tolist(),
+            )
 
-    # Легенда (минимальная)
-    ttk.Label(vf,
-              text="● Синие: частицы   ● Оранжевая: лучший   ★ Красная: минимум",
-              font=("", 8), foreground="#555555").grid(
-        row=1, column=0, sticky="w", padx=2, pady=(2, 0))
-
-    # Живая статистика
-    info_var = tk.StringVar(value="")
-    ttk.Label(vf, textvariable=info_var, font=("Courier", 9),
-              foreground="#225599").grid(row=2, column=0, sticky="w",
-                                         padx=4, pady=(2, 4))
-
-    # Буфер следа лучшей позиции (последние N точек)
-    _best_trail: list = []
-    _TRAIL_LEN = 30
-
-    def _redraw_viz(it: int, total: int, gbest_val: float,
-                    positions_xy: np.ndarray, gbest_xy: np.ndarray):
-        """Перерисовать холст с текущим роем, следом и статистикой."""
-        viz_canvas.delete("swarm")
+        # Best particle
+        if gbest_xy is not None:
+            self._best_scatter.setData(
+                x=[float(gbest_xy[0])],
+                y=[float(gbest_xy[1])],
+            )
 
         if gbest_xy is not None:
-            tx, ty = _world_to_canvas(gbest_xy[0], gbest_xy[1])
-            _best_trail.append((tx, ty))
-            if len(_best_trail) > _TRAIL_LEN:
-                del _best_trail[:-_TRAIL_LEN]
-
-        n = len(_best_trail)
-        for i, (tx, ty) in enumerate(_best_trail):
-            frac = (i + 1) / max(n, 1)
-            g = int(60 + frac * 155)
-            trail_color = f"#00{g:02x}44"
-            r_t = max(1, round(frac * 3))
-            viz_canvas.create_oval(tx - r_t, ty - r_t, tx + r_t, ty + r_t,
-                                   fill=trail_color, outline="", tags="swarm")
-
-        if positions_xy is not None:
-            for xi, yi in positions_xy:
-                cx, cy = _world_to_canvas(xi, yi)
-                viz_canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3,
-                                       fill="#4488cc", outline="", tags="swarm")
-
-        if gbest_xy is not None:
-            bx_c, by_c = _world_to_canvas(gbest_xy[0], gbest_xy[1])
-            viz_canvas.create_oval(bx_c - 6, by_c - 6, bx_c + 6, by_c + 6,
-                                   fill="#ff8800", outline="#ffffff", width=1,
-                                   tags="swarm")
-
-        viz_canvas.tag_raise("true_min")
-
-        if gbest_xy is not None:
-            info_var.set(
+            self._info_lbl.setText(
                 f"Итерация: {it + 1} / {total}\n"
                 f"Лучшее f: {gbest_val:.4f}\n"
                 f"Лучшая точка: ({gbest_xy[0]:.2f}, {gbest_xy[1]:.2f})"
             )
 
-    def _clear_viz():
-        _best_trail.clear()
-        viz_canvas.delete("swarm")
-        info_var.set("")
+    # ------------------------------------------------------------------
+    # Запуск / результаты
+    # ------------------------------------------------------------------
 
-    # =========================================================================
-    # Управление
-    # =========================================================================
-    cf = ttk.Frame(root, padding=8)
-    cf.grid(row=1, column=0, sticky="ew")
-
-    run_btn = ttk.Button(cf, text="▶  Запустить")
-    run_btn.grid(row=0, column=0, padx=4, pady=4)
-
-    status_var = tk.StringVar(value="Готово")
-    ttk.Label(cf, textvariable=status_var,
-              font=("", 10, "bold")).grid(row=0, column=1, sticky="w", padx=8)
-
-    pb_var = tk.IntVar(value=0)
-    ttk.Progressbar(cf, variable=pb_var, maximum=100,
-                    length=400, mode="determinate").grid(
-        row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
-
-    pb_lbl = tk.StringVar(value="")
-    ttk.Label(cf, textvariable=pb_lbl, font=("", 8)).grid(
-        row=2, column=0, columnspan=2, sticky="w", padx=4)
-
-    # =========================================================================
-    # Результаты
-    # =========================================================================
-    rf = ttk.LabelFrame(root, text="Результаты", padding=8)
-    rf.grid(row=2, column=0, padx=10, pady=8, sticky="nsew")
-
-    res_txt = tk.Text(rf, height=7, width=70, state="disabled",
-                      font=("Courier", 9))
-    res_txt.grid(row=0, column=0, sticky="nsew")
-
-    def _show(r):
-        res_txt.config(state="normal")
-        res_txt.delete("1.0", "end")
-        res_txt.insert("end",
-                       f"Лучшая точка : x = {r['gbest_x']:.6f},  "
-                       f"y = {r['gbest_y']:.6f}\n")
-        res_txt.insert("end", f"f(x, y)       = {r['best_f']:.6f}\n")
-        res_txt.insert("end", f"dx до истины  = {r['dx']:.6f}\n")
-        res_txt.insert("end", f"df = f − f*   = {r['df']:.6f}\n")
-        res_txt.insert("end", f"Вычислений f  : {r['evals']}\n")
-        res_txt.insert("end", f"Итераций      : {r['iters_done']}\n")
-        if r["mode"] == "constriction":
-            res_txt.insert("end", f"Коэффициент χ : {r['chi']:.6f}\n")
-        res_txt.insert("end", f"Время         : {r['time_sec']:.3f} с\n")
-        res_txt.config(state="disabled")
-
-    # Трасса PSO с русскими заголовками столбцов
-    _TRACE_RU_COLUMNS = {
-        "iter":    "итерация",
-        "best_f":  "лучшее_f",
-        "mean_f":  "среднее_f",
-        "best_dx": "dx_лучшей",
-        "gbest_x": "лучший_x",
-        "gbest_y": "лучший_y",
-    }
-
-    # =========================================================================
-    # Рабочий поток
-    # =========================================================================
-    def _worker():
+    def _on_start(self):
+        mode_internal = _MODE_LABELS.get(self._mode_cb.currentText(), "basic")
         try:
-            mode_internal = _MODE_LABELS.get(mode_var.get(), "basic")
             params: dict = {
                 "mode":       mode_internal,
-                "swarm_size": int(swarm_var.get()),
-                "iters":      int(iters_var.get()),
-                "c1":         float(c1_var.get()),
-                "c2":         float(c2_var.get()),
+                "swarm_size": int(self._swarm_ed.text()),
+                "iters":      int(self._iters_ed.text()),
+                "c1":         float(self._c1_ed.text()),
+                "c2":         float(self._c2_ed.text()),
                 "viz_every":  10,
             }
             if mode_internal == "basic":
-                params["w"] = float(w_var.get())
+                params["w"] = float(self._w_ed.text())
         except ValueError as exc:
-            q.put(("error", f"Ошибка в параметрах: {exc}"))
+            QMessageBox.critical(self, "Ошибка", f"Ошибка в параметрах: {exc}")
             return
 
-        def cb(it, total, gbest_val, positions_xy=None, gbest_xy=None):
-            pct = int(it / max(total, 1) * 100)
-            q.put(("progress", it, total, gbest_val, pct, positions_xy, gbest_xy))
+        self._run_btn.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._pb_lbl.setText("")
+        self._status_lbl.setText("Выполняется…")
+        self._clear_viz()
 
-        try:
-            result, trace_df = run_pso(params, callback=cb)
-            q.put(("done", result, trace_df))
-        except Exception as exc:
-            q.put(("error", str(exc)))
+        self._worker = _PSOWorker(params)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.done.connect(self._on_done)
+        self._worker.error.connect(self._on_error)
+        self._worker.start()
 
-    def _start():
-        run_btn.config(state="disabled")
-        pb_var.set(0)
-        pb_lbl.set("")
-        status_var.set("Выполняется…")
-        _clear_viz()
-        threading.Thread(target=_worker, daemon=True).start()
-        root.after(50, _poll)
+    def _on_progress(self, it: int, total: int, gbest_val: float,
+                     positions_xy, gbest_xy):
+        pct = int(it / max(total, 1) * 100)
+        self._progress_bar.setValue(pct)
+        self._pb_lbl.setText(f"Итерация {it}/{total},  f = {gbest_val:.4f}")
+        if positions_xy is not None:
+            self._redraw_viz(it, total, gbest_val, positions_xy, gbest_xy)
 
-    def _poll():
-        try:
-            while True:
-                msg = q.get_nowait()
-                if msg[0] == "progress":
-                    _, it, total, gbest_val, pct, positions_xy, gbest_xy = msg
-                    pb_var.set(pct)
-                    pb_lbl.set(f"Итерация {it}/{total},  f = {gbest_val:.4f}")
-                    if positions_xy is not None:
-                        _redraw_viz(it, total, gbest_val, positions_xy, gbest_xy)
-                elif msg[0] == "done":
-                    result, trace_df = msg[1], msg[2]
-                    status_var.set("Готово")
-                    pb_var.set(100)
-                    _show(result)
-                    os.makedirs("out", exist_ok=True)
-                    with open(os.path.join("out", "pso_last_result.json"),
-                              "w", encoding="utf-8") as fh:
-                        json.dump(result, fh, ensure_ascii=False, indent=2)
-                    trace_ru = trace_df.rename(columns=_TRACE_RU_COLUMNS)
-                    trace_ru.to_csv(
-                        os.path.join("out", "pso_last_trace.csv"), index=False,
-                        encoding="utf-8")
-                    pb_lbl.set(
-                        "Сохранено: out/pso_last_result.json, "
-                        "out/pso_last_trace.csv")
-                    run_btn.config(state="normal")
-                    return
-                elif msg[0] == "error":
-                    status_var.set("Ошибка")
-                    messagebox.showerror("Ошибка", msg[1])
-                    run_btn.config(state="normal")
-                    return
-        except _queue.Empty:
-            pass
-        root.after(50, _poll)
+    def _on_done(self, result: dict, trace_df):
+        self._status_lbl.setText("Готово")
+        self._progress_bar.setValue(100)
+        self._show_result(result)
+        os.makedirs("out", exist_ok=True)
+        with open(os.path.join("out", "pso_last_result.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump(result, fh, ensure_ascii=False, indent=2)
+        trace_ru = trace_df.rename(columns=_TRACE_RU_COLUMNS)
+        trace_ru.to_csv(
+            os.path.join("out", "pso_last_trace.csv"), index=False,
+            encoding="utf-8")
+        self._pb_lbl.setText(
+            "Сохранено: out/pso_last_result.json, out/pso_last_trace.csv")
+        self._run_btn.setEnabled(True)
 
-    run_btn.config(command=_start)
-    root.mainloop()
+    def _on_error(self, msg: str):
+        self._status_lbl.setText("Ошибка")
+        QMessageBox.critical(self, "Ошибка", msg)
+        self._run_btn.setEnabled(True)
+
+    def _show_result(self, r: dict):
+        lines = [
+            f"Лучшая точка : x = {r['gbest_x']:.6f},  y = {r['gbest_y']:.6f}",
+            f"f(x, y)       = {r['best_f']:.6f}",
+            f"dx до истины  = {r['dx']:.6f}",
+            f"df = f − f*   = {r['df']:.6f}",
+            f"Вычислений f  : {r['evals']}",
+            f"Итераций      : {r['iters_done']}",
+        ]
+        if r["mode"] == "constriction":
+            lines.append(f"Коэффициент χ : {r['chi']:.6f}")
+        lines.append(f"Время         : {r['time_sec']:.3f} с")
+        self._res_txt.setPlainText("\n".join(lines))
+
+
+def main():
+    """Точка входа при запуске `python pso_app.py` — открывает GUI-окно."""
+    app = QApplication.instance() or QApplication([])
+    window = _PSOWindow()
+    window.show()
+    app.exec()
 
 
 if __name__ == "__main__":
