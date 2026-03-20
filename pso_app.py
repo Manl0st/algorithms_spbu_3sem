@@ -568,7 +568,7 @@ class _PSOWindow(QWidget):
 
     def _on_progress(self, it: int, total: int, gbest_val: float,
                      positions_xy, gbest_xy):
-        pct = int(it / max(total, 1) * 100)
+        pct = int((it + 1) / max(total, 1) * 100)
         self._progress_bar.setValue(pct)
         self._pb_lbl.setText(f"Итерация {it}/{total},  f = {gbest_val:.4f}")
         if positions_xy is not None:

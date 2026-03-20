@@ -758,7 +758,7 @@ class _GAWindow(QWidget):
 
     def _on_progress(self, gen: int, gens: int, best_f: float,
                      positions_xy, best_xy):
-        pct = int(gen / max(gens, 1) * 100)
+        pct = int((gen + 1) / max(gens, 1) * 100)
         self._progress_bar.setValue(pct)
         self._pb_lbl.setText(f"Поколение {gen}/{gens},  f = {best_f:.4f}")
         if positions_xy is not None:
